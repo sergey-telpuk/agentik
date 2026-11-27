@@ -1,4 +1,6 @@
-# Builds miniapp/ and deploys it to GitHub Pages.
+# Builds miniapp/ and the macOS daemon binaries and deploys them to GitHub Pages
+# as one site: the Mini App at the root, the daemon under downloads/
+# (https://<owner>.github.io/<repo>/downloads/).
 # One-time setup: Settings > Pages > Build and deployment > Source: GitHub Actions.
 # Manual run without pushing to main: Actions > this workflow > Run workflow
 # (the Pages environment may restrict which branches may deploy).
@@ -18,8 +20,63 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+env:
+  # Site output directory: the root of the Pages artifact, served at /<repo>/.
+  # Must match the Vite output directory (miniapp/dist by default).
+  SITE_DIR: miniapp/dist
+  # Subdirectory of SITE_DIR that holds the daemon downloads.
+  DOWNLOADS_SUBDIR: downloads
+
 jobs:
+  daemon:
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: go1.27.4 # pinned like daemon/go.mod
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history and tags, so a tag on HEAD can be found
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+      - name: Vet
+        working-directory: daemon
+        run: go vet ./...
+      - name: Test
+        working-directory: daemon
+        run: go test -race ./...
+      - name: Build macOS binaries
+        # modernc.org/sqlite is pure Go, so CGO is not needed and the Darwin
+        # binaries cross-compile on Linux.
+        run: |
+          set -euo pipefail
+          if tag="$(git describe --tags --exact-match HEAD 2>/dev/null)"; then
+            version="$tag"
+          else
+            version="sha-$(git rev-parse --short HEAD)"
+          fi
+          echo "Building daemon version: $version"
+          out="$PWD/downloads"
+          mkdir -p "$out"
+          for arch in arm64 amd64; do
+            (cd daemon && CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" GOTOOLCHAIN=go1.27.4 \
+              go build -trimpath -ldflags "-s -w -X main.version=$version" \
+              -o "$out/agentik-darwin-$arch" ./cmd/agentik)
+          done
+          cp .github/downloads/README.txt "$out/README.txt"
+          # index.html makes /downloads/ resolve instead of falling through to the
+          # Mini App's 404.html fallback.
+          sed "s/@VERSION@/$version/g" .github/downloads/index.html > "$out/index.html"
+          (cd "$out" && sha256sum agentik-darwin-arm64 agentik-darwin-amd64 > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon-downloads
+          path: downloads
+          if-no-files-found: error
+
   build:
+    needs: daemon
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -40,10 +97,15 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      - uses: actions/download-artifact@v4
+        with:
+          name: daemon-downloads
+          # Resolved from the repository root, not from working-directory.
+          path: ${{ env.SITE_DIR }}/${{ env.DOWNLOADS_SUBDIR }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: miniapp/dist
+          path: ${{ env.SITE_DIR }}
 
   deploy:
     needs: build
