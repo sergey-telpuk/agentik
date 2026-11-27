@@ -237,13 +237,13 @@ export function SessionScreen({
         <textarea
           id={composerId}
           className="composer-input"
-          rows={2}
+          rows={1}
           value={draft}
           onChange={(e) => {
             setDraft(e.target.value);
             setSendError(null);
           }}
-          placeholder={active === null ? "Message the agent" : "Type your next message while the agent works"}
+          placeholder="Message the agent"
           aria-describedby={counterId}
           aria-invalid={tooLong}
           disabled={sending}

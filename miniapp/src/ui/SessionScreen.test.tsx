@@ -197,11 +197,8 @@ describe("SessionScreen", () => {
 
     expect(container.querySelectorAll(".bubble-user")).toHaveLength(2);
     expect(container.querySelectorAll(".bubble-agent")).toHaveLength(2);
-    // Each reply carries its own status chip.
-    expect([...container.querySelectorAll(".bubble-agent .chip-label")].map((c) => c.textContent)).toEqual([
-      "succeeded",
-      "succeeded",
-    ]);
+    // A reply that succeeded carries no status chip; the chip is for turns that run or ended otherwise.
+    expect(container.querySelectorAll(".bubble-agent .chip")).toHaveLength(0);
     // Only the reply with a diff lists changed files; both replies can be copied.
     expect(container.querySelectorAll(".bubble-changes")).toHaveLength(1);
     expect(container.querySelector(".bubble-changes")?.textContent).toContain("src/a.ts");
