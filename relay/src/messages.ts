@@ -124,6 +124,8 @@ export const CLOSE_CODES = {
   replaced: 4000,
   /** A protocol error; the reason is the error code. */
   protocolError: 4001,
+  /** The receiver read too slowly and its outgoing queue hit the bound. */
+  slowReceiver: 4002,
   /** An idle or unauthenticated socket was closed to make room for a new one. */
   evicted: 4003,
 } as const;

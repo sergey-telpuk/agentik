@@ -44,6 +44,7 @@ import {
   verifyEd25519,
 } from "./protocol";
 import { LIMITS, sourceKey } from "./limits";
+import { sendWithinBudget } from "./backpressure";
 
 /** Bindings available to the Worker and the object. */
 export interface Env {
@@ -548,8 +549,18 @@ export class DeviceRoom implements DurableObject {
         );
         return;
       }
-      this.#forward(target, serializeServerMessage(frameMessage(payload.data)));
-      this.#touch(target);
+      if (this.#forward(target, serializeServerMessage(frameMessage(payload.data)))) {
+        this.#touch(target);
+      } else {
+        this.#send(
+          ws,
+          errorMessage(
+            "peer_unavailable",
+            "the client was too slow and was disconnected",
+            payload.connectionId,
+          ),
+        );
+      }
       return;
     }
 
@@ -568,19 +579,24 @@ export class DeviceRoom implements DurableObject {
       return;
     }
     const message = serializeServerMessage(frameMessage(payload.data, state.connectionId));
+    let delivered = false;
     for (const daemon of devices) {
-      this.#forward(daemon, message);
+      if (this.#forward(daemon, message)) delivered = true;
+    }
+    if (!delivered) {
+      this.#send(ws, errorMessage("peer_unavailable", "the device was too slow and was disconnected"));
     }
   }
 
-  #forward(target: WebSocket, message: string): void {
-    // A send that fails means the peer is gone; the close handler will clean
-    // it up.
-    try {
-      target.send(message);
-    } catch {
-      // Intentionally ignored: handled by webSocketClose.
-    }
+  /**
+   * Sends a frame within the receiver's queue budget. A receiver that would
+   * exceed it is closed and its peers are told it left; the frame is dropped
+   * rather than buffered.
+   */
+  #forward(target: WebSocket, message: string): boolean {
+    if (sendWithinBudget(target, message, LIMITS.maxBufferedBytes)) return true;
+    this.#drop(target, CLOSE_CODES.slowReceiver, "receive queue limit exceeded");
+    return false;
   }
 
   /** Records traffic to a client, so it does not count as idle. */
