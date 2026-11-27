@@ -27,7 +27,13 @@ import {
 export type ClientMessage =
   | { type: "register"; payload: RegisterPayload }
   | { type: "attach"; payload: AttachPayload }
-  | { type: "signal"; payload: SignalPayload };
+  | { type: "signal"; payload: SignalPayload }
+  /**
+   * A device asking for TURN credentials. The relay mints them from its own
+   * key, so a user never configures one. Only a registered device socket may
+   * ask: the registration signature is what proves the request is genuine.
+   */
+  | { type: "turn" };
 
 /**
  * Messages the relay sends to a peer.
@@ -55,8 +61,20 @@ export type ServerMessage =
   | { type: "signal"; kind: SignalKind; data: string; connectionId?: string }
   /** `connectionId` is set when the error concerns one client connection. */
   | { type: "error"; code: ErrorCode; message: string; connectionId?: string }
+  /**
+   * TURN credentials for the asking device, with the seconds they stay valid.
+   * They are derived and short-lived: the relay's own key never leaves it.
+   */
+  | { type: "turn"; iceServers: IceServer[]; expiresIn: number }
   /** Keepalive reply, sent by the runtime; see KEEPALIVE_PING. */
   | { type: "pong" };
+
+/** One STUN or TURN server, in the form RTCPeerConnection expects. */
+export interface IceServer {
+  urls: string[];
+  username?: string;
+  credential?: string;
+}
 
 /**
  * Error codes are a closed set so a client can branch on them. The human
@@ -239,6 +257,8 @@ export function parseClientMessage(
   switch (message["type"]) {
     case "register":
       return parseRegister(message);
+    case "turn":
+      return { ok: true, value: { type: "turn" } };
     case "attach":
       return parseAttach(message);
     case "signal":

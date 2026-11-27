@@ -257,6 +257,13 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	if err != nil {
 		return err
 	}
+	// Credentials from the relay need no configuration at all, so they are
+	// the default. An explicitly configured provider wins: someone who set
+	// one up means to use it.
+	relayTURN := &webrtc.RelayTURN{}
+	if turnProvider == nil {
+		turnProvider = relayTURN
+	}
 
 	// One mutex for both streams keeps lines whole when they share a terminal.
 	var outMu sync.Mutex
@@ -347,6 +354,20 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 			},
 			OnRegistered: func(_ string, connections []string) {
 				acceptor.HandleRegistered(runCtx, connections)
+			},
+			OnTURN: func(servers []transport.InboundICEServer, expiresIn int) {
+				ice := make([]webrtc.ICEServer, 0, len(servers))
+				for _, s := range servers {
+					ice = append(ice, webrtc.ICEServer{URLs: s.URLs, Username: s.Username, Credential: s.Credential})
+				}
+				// Renew a little early, so a credential handed to a phone is
+				// still valid while ICE is negotiating.
+				ttl := time.Duration(expiresIn) * time.Second
+				if ttl > time.Minute {
+					ttl -= time.Minute
+				}
+				relayTURN.Store(ice, ttl)
+				logf("relay: TURN credentials received (%d servers, %s)", len(ice), ttl.Round(time.Minute))
 			},
 			// No OnDisconnected: a DataChannel that is already open does not
 			// depend on the relay, so losing the relay does not end it.

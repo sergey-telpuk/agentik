@@ -19,6 +19,7 @@
  * fields, which do not survive eviction.
  */
 
+import { mintIceServers, TurnUnavailable } from "./turn";
 import {
   CLOSE_CODES,
   KEEPALIVE_PING,
@@ -60,6 +61,13 @@ export interface Env {
   CONNECT_LIMITER: RateLimit;
   /** Per-source-IP registration attempts; see limits.ts. */
   REGISTER_LIMITER: RateLimit;
+  /**
+   * Cloudflare TURN key id and API token. Set as Worker secrets; without
+   * them the relay answers TURN requests with "unavailable" and devices use
+   * STUN alone, which works wherever a direct path exists.
+   */
+  TURN_KEY_ID?: string;
+  TURN_TOKEN?: string;
 }
 
 
@@ -250,6 +258,34 @@ export class DeviceRoom implements DurableObject {
       case "signal":
         this.#handleSignal(ws, current, parsed.value.payload);
         return;
+      case "turn":
+        await this.#handleTurn(ws, current);
+        return;
+    }
+  }
+
+  /**
+   * Hands TURN credentials to a registered device.
+   *
+   * Only a device socket may ask. Its role is set after the registration
+   * signature was verified, so the credentials go to the holder of that
+   * device key rather than to anyone who knows a device identifier.
+   */
+  async #handleTurn(ws: WebSocket, state: SocketState): Promise<void> {
+    if (state.role !== "device") {
+      this.#send(ws, errorMessage("unauthorized", "only a registered device may ask for TURN credentials"));
+      return;
+    }
+    try {
+      const minted = await mintIceServers({ keyId: this.#env.TURN_KEY_ID, token: this.#env.TURN_TOKEN });
+      this.#send(ws, { type: "turn", iceServers: minted.iceServers, expiresIn: minted.expiresIn });
+    } catch (err) {
+      // A relay without TURN still works wherever a direct path exists, so
+      // this is reported to the device rather than closing its connection.
+      const message = err instanceof TurnUnavailable ? err.message : "TURN credentials are not available right now";
+      // peer_unavailable is the existing "cannot be done right now" code;
+      // a TURN outage is not a fault of the request.
+      this.#send(ws, errorMessage("peer_unavailable", message));
     }
   }
 

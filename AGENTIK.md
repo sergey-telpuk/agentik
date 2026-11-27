@@ -26,7 +26,7 @@ The product is built from scratch. Using libraries, standard protocols, and offi
 | Local state | SQLite; keys in the OS secure store where one is available |
 | Remote transport | WebRTC `RTCDataChannel` (reliable, ordered) between the Mini App and the local application. All application data uses it and nothing else |
 | Cloud component | A single relay on Cloudflare Workers and Durable Objects, used for signaling only: SDP offer and answer, ICE candidates, the ICE server list, device registration and presence. It never carries application data |
-| NAT traversal | STUN and TURN servers are configured on the computer. TURN is optional, but a network pair with no direct path cannot connect without one. Either the user runs their own (for example coturn on a VPS), or they point the daemon at Cloudflare Realtime TURN with a key id and an API token |
+| NAT traversal | The relay mints TURN credentials for registered devices, so a user configures nothing and a pair of networks with no direct path still connects. A self-run server or a separate provider key can be configured instead |
 | Fallback | None. If the DataChannel cannot open, the connection fails with a stated reason. The relay never forwards application data |
 | End-to-end encryption | Noise over the DataChannel, with both DTLS fingerprints bound into the Noise prologue |
 | First agent | Codex installed and authorized on the PC, over App Server via stdio |
@@ -303,7 +303,9 @@ Method names and the JSON Schema are fixed before clients are implemented. An un
 
 The daemon limits concurrent peers, drops a peer whose DataChannel has not opened within a connect timeout, and drops one that stops draining its queue.
 
-**TURN credentials.** Two schemes are supported, and in both the long-lived secret stays on the computer: only derived, time-limited credentials reach the phone.
+**TURN credentials.** TURN has no anonymous mode: RFC 8656 requires authentication, or the server becomes an open relay for anyone's traffic. Three schemes are supported, and in all of them the long-lived secret stays where it was configured: only derived, time-limited credentials travel.
+
+By default the relay holds the key. A device that has registered asks for credentials over the same socket, and the registration signature is what entitles it to them: a phone that merely knows a device identifier is refused. The relay mints them through the Cloudflare API and forwards the list; its key is a Worker secret and never leaves it. A relay with no key configured says so, and devices fall back to direct paths and STUN.
 
 With Cloudflare Realtime TURN the daemon posts to `rtc.live.cloudflare.com` with its key id and API token and forwards the returned `iceServers`. The list is cached until shortly before it expires, and a failure falls back to STUN rather than taking the direct path down. The API token is read from a file or the environment, never from a command-line value. URLs on port 53 are dropped: browsers block it.
 

@@ -103,6 +103,17 @@ type inboundEnvelope struct {
 	ConnectionID string   `json:"connectionId"`
 	Code         string   `json:"code"`
 	Message      string   `json:"message"`
+
+	// TURN credentials, minted by the relay so no user configures a key.
+	ICEServers []InboundICEServer `json:"iceServers"`
+	ExpiresIn  int                `json:"expiresIn"`
+}
+
+// InboundICEServer is one STUN or TURN server from the relay.
+type InboundICEServer struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username"`
+	Credential string   `json:"credential"`
 }
 
 func decodeInbound(raw []byte) (*inboundEnvelope, error) {

@@ -47,6 +47,9 @@ type Handlers struct {
 	OnPeerState    func(connectionID string, present bool)
 	OnSignal       func(connectionID, kind string, data []byte)
 	OnRelayError   func(code, message, connectionID string)
+	// OnTURN receives the credentials the relay minted, and how long they
+	// last. The relay holds the key, so no user configures one.
+	OnTURN func(servers []InboundICEServer, expiresIn int)
 }
 
 // Config configures a transport Client.
@@ -318,6 +321,16 @@ func (c *Client) runOnce(ctx context.Context, generation uint64) runOutcome {
 		c.cfg.Handlers.OnRegistered(registeredMsg.DeviceID, append([]string(nil), registeredMsg.Connections...))
 	}
 
+	// Ask for TURN credentials now that the socket is a registered device:
+	// that registration signature is what entitles it to them. The answer
+	// arrives on the read loop below, and a relay without a TURN key simply
+	// reports that, leaving direct paths and STUN to do the work.
+	if c.cfg.Handlers.OnTURN != nil {
+		// Best effort: a relay that cannot answer leaves direct paths and
+		// STUN to do the work, which is not a reason to drop the session.
+		_ = conn.writeText(ctx, []byte(`{"type":"turn"}`))
+	}
+
 	// Start keepalive loop and run read loop until disconnect/cancel.
 	pongCh := make(chan struct{}, 1)
 	keepaliveErrCh := make(chan error, 1)
@@ -466,6 +479,10 @@ func (c *Client) readLoop(ctx context.Context, ws *websocket.Conn, pongCh chan<-
 			select {
 			case pongCh <- struct{}{}:
 			default:
+			}
+		case "turn":
+			if c.cfg.Handlers.OnTURN != nil && len(msg.ICEServers) > 0 {
+				c.cfg.Handlers.OnTURN(msg.ICEServers, msg.ExpiresIn)
 			}
 		case "peer_state":
 			if msg.Present == nil || msg.ConnectionID == "" {
