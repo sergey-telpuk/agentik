@@ -46,7 +46,11 @@ function GetStarted() {
         <ol className="steps">
           <li>Download the file for your computer and check the checksum.</li>
           <li>
-            In a terminal on that computer, run the daemon with <code>-pair</code>.
+            {/* A downloaded file arrives without the executable bit, whichever
+                way it was fetched, so this step is not optional. */}
+            In a terminal on that computer, make it runnable and start it:
+            <code className="steps-code">chmod +x agentik-darwin-arm64</code>
+            <code className="steps-code">./agentik-darwin-arm64</code>
           </li>
           <li>Paste the invitation or scan the QR code here.</li>
           <li>Confirm the pairing with “y” in that terminal.</li>

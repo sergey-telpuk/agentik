@@ -20,10 +20,19 @@
   <li><a href="SHA256SUMS">SHA256SUMS</a> - checksums</li>
   <li><a href="README.txt">README.txt</a> - how to verify and run</li>
 </ul>
-<p>Run <code>uname -m</code> to check: <code>arm64</code> is Apple Silicon, <code>x86_64</code> is Intel.
-Downloading with curl avoids the macOS quarantine prompt:</p>
+<p>Run <code>uname -m</code> to check: <code>arm64</code> is Apple Silicon, <code>x86_64</code> is Intel.</p>
+
+<h2>After downloading</h2>
+<p>A downloaded file is not executable yet, whichever way you got it. In Terminal,
+in the folder you downloaded to:</p>
+<pre>chmod +x agentik-darwin-arm64
+./agentik-darwin-arm64</pre>
+<p>If you downloaded in a browser, macOS may also refuse the first run. Allow it in
+System Settings &gt; Privacy &amp; Security, or clear the quarantine flag:</p>
+<pre>xattr -d com.apple.quarantine agentik-darwin-arm64</pre>
+<p>Downloading with curl avoids that prompt altogether:</p>
 <pre>curl -fLO https://sergey-telpuk.github.io/agentik/downloads/agentik-darwin-arm64
 chmod +x agentik-darwin-arm64
-./agentik-darwin-arm64 -pair</pre>
+./agentik-darwin-arm64</pre>
 </body>
 </html>

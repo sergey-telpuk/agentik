@@ -128,7 +128,7 @@ describe("ComputersScreen empty state", () => {
     const steps = [...(block()?.querySelectorAll("ol.steps li") ?? [])].map((li) => li.textContent);
     expect(steps).toEqual([
       "Download the file for your computer and check the checksum.",
-      "In a terminal on that computer, run the daemon with -pair.",
+      "In a terminal on that computer, make it runnable and start it:chmod +x agentik-darwin-arm64./agentik-darwin-arm64",
       "Paste the invitation or scan the QR code here.",
       "Confirm the pairing with “y” in that terminal.",
     ]);
