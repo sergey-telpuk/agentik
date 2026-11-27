@@ -3,6 +3,7 @@ module github.com/sergey-telpuk/agentik/daemon
 go 1.27.4
 
 require (
+	github.com/coder/websocket v1.8.14
 	github.com/flynn/noise v1.1.0
 	modernc.org/sqlite v1.63.0
 )
