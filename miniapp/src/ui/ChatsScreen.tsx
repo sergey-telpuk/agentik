@@ -177,6 +177,13 @@ export function ChatsScreen({ api, now, onOpen, onNew, onSettings, onComputers }
     <Page
       title="Agentik"
       actions={
+        <>
+        <button type="button" className="icon-button" onClick={onComputers} aria-label="Computers">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+            <rect x="3" y="4.5" width="18" height="12" rx="2" fill="none" stroke="currentColor" strokeWidth="1.8" />
+            <path d="M8.5 20h7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          </svg>
+        </button>
         <button type="button" className="icon-button" onClick={onSettings} aria-label="Settings and diagnostics">
           <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
             <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" strokeWidth="1.8" />
@@ -189,6 +196,7 @@ export function ChatsScreen({ api, now, onOpen, onNew, onSettings, onComputers }
             />
           </svg>
         </button>
+        </>
       }
     >
       {(effective.kind === "loading" || connecting) && <SkeletonList rows={4} label="Loading conversations" />}

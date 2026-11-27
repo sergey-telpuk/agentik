@@ -101,7 +101,7 @@ function button(label: string): HTMLButtonElement {
 async function goToComputers(): Promise<void> {
   for (let i = 0; i < 60; i++) {
     const link = [...container.querySelectorAll("button")].find(
-      (b) => b.getAttribute("aria-label") === "New conversation" || b.textContent === "Pair a computer",
+      (b) => b.getAttribute("aria-label") === "Computers" || b.textContent === "Pair a computer",
     );
     if (link !== undefined) {
       await act(async () => {

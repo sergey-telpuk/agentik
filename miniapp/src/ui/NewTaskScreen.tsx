@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from "react";
-import { MAX_PROMPT_LENGTH, type Agent, type AgentikApi, type AgentId, type TaskSummary } from "../api/types";
+import { MAX_PROMPT_LENGTH, type Agent, type AgentikApi, type AgentId, type Project, type TaskSummary } from "../api/types";
 import { sentence } from "./format";
 import { Notice, Page, SkeletonList, useBusy } from "./kit";
 import { ModelSelect, knownModel } from "./ModelSelect";
@@ -10,6 +10,9 @@ interface Props {
   readonly computerName: string;
   readonly projectId: string;
   readonly projectName: string;
+  /** Offered as a picker when the conversation is started from the home screen. */
+  readonly projects?: readonly Project[];
+  readonly onProject?: (projectId: string) => void;
   readonly initialPrompt?: string;
   readonly newRequestId: () => string;
   readonly onStarted: (task: TaskSummary) => void;
@@ -22,6 +25,8 @@ export function NewTaskScreen({
   computerName,
   projectId,
   projectName,
+  projects,
+  onProject,
   initialPrompt = "",
   newRequestId,
   onStarted,
@@ -38,6 +43,7 @@ export function NewTaskScreen({
   const [request, setRequest] = useState<{ id: string; content: string } | null>(null);
   const [busy, run] = useBusy();
   const promptId = useId();
+  const projectPickerId = useId();
   const counterId = useId();
   const modelId = useId();
   const modelHintId = useId();
@@ -124,6 +130,25 @@ export function NewTaskScreen({
             {`${trimmed.length} / ${MAX_PROMPT_LENGTH} characters`}
           </p>
         </div>
+
+        {projects !== undefined && projects.length > 1 && onProject !== undefined && (
+          <div className="field">
+            <label htmlFor={projectPickerId}>Folder</label>
+            <select
+              id={projectPickerId}
+              className="select"
+              value={projectId}
+              onChange={(e) => onProject(e.target.value)}
+              disabled={busy}
+            >
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         <fieldset className="field">
           <legend>Agent</legend>

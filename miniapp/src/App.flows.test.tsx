@@ -75,7 +75,7 @@ async function render(scenario: ScenarioName): Promise<void> {
   // that takes depends on the scenario, so poll instead of guessing.
   for (let i = 0; i < 20; i++) {
     const link = [...container.querySelectorAll("button")].find(
-      (b) => b.textContent === "Pair a computer" || b.getAttribute("aria-label") === "New conversation",
+      (b) => b.getAttribute("aria-label") === "Computers" || b.textContent === "Pair a computer",
     );
     if (link !== undefined) {
       await act(async () => {
@@ -183,7 +183,7 @@ describe("App flows on mock data", () => {
     await click("Forget computer", 10);
     // Forgetting returns home (the conversation list); the remaining computer
     // is still paired, so reach its row through the new-conversation button.
-    await click("New conversation", 10);
+    await click("Computers", 10);
     expect(container.querySelector("li.computer-row")).not.toBeNull();
     expect(container.textContent).not.toContain("Home Linux box");
   });
@@ -339,7 +339,7 @@ describe("App flows on mock data", () => {
     await click("Back to computers", 10);
     // That returns home (the conversation list); the computers screen is one
     // step further.
-    await click("New conversation", 10);
+    await click("Computers", 10);
     // The list row shows no status; opening a revoked computer leads to the access-ended screen.
     expect(container.textContent).not.toContain("access ended");
     await click("Open Work MacBook", 10);

@@ -6,6 +6,7 @@ import type { PinnedDeviceStore } from "./storage/pinnedDevices";
 import { AccessEndedScreen } from "./ui/AccessEndedScreen";
 import { ComputerScreen } from "./ui/ComputerScreen";
 import { ChatsScreen } from "./ui/ChatsScreen";
+import { StartChatScreen } from "./ui/StartChatScreen";
 import { ComputersScreen } from "./ui/ComputersScreen";
 import { NewTaskScreen } from "./ui/NewTaskScreen";
 import { PairScreen } from "./ui/PairScreen";
@@ -16,6 +17,7 @@ import { TerminalScreen } from "./ui/TerminalScreen";
 
 type Route =
   | { readonly name: "chats" }
+  | { readonly name: "start_chat" }
   | { readonly name: "computers" }
   | { readonly name: "pair" }
   | { readonly name: "settings" }
@@ -244,9 +246,28 @@ function Screen({ route, ready, services, connection, listKey, scenarios, push, 
               push({ name: "session", computer, sessionId, projectId, projectName: projectId, initialTurn: null });
             });
           }}
-          onNew={() => push({ name: "computers" })}
+          onNew={() => push({ name: "start_chat" })}
           onComputers={() => push({ name: "computers" })}
           onSettings={() => push({ name: "settings" })}
+        />
+      );
+    case "start_chat":
+      return (
+        <StartChatScreen
+          api={api}
+          newRequestId={newRequestId}
+          onStarted={(computer, project, task) =>
+            replace({
+              name: "session",
+              computer,
+              sessionId: task.sessionId,
+              projectId: project.id,
+              projectName: project.name,
+              initialTurn: task,
+            })
+          }
+          onComputers={() => push({ name: "computers" })}
+          onBack={back}
         />
       );
     case "computers":
