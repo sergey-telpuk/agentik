@@ -21,6 +21,7 @@ type RelayTURN struct {
 	servers []ICEServer
 	expires time.Time
 	ready   chan struct{}
+	waited  bool
 }
 
 // Wait blocks until credentials have arrived, the context ends, or the grace
@@ -32,10 +33,14 @@ type RelayTURN struct {
 // after the grace period is better than hanging.
 func (r *RelayTURN) Wait(ctx context.Context, grace time.Duration) {
 	r.mu.Lock()
-	if len(r.servers) > 0 {
+	// Already answered, or already waited once: a later client must not pay
+	// the grace period again, and a relay that is never going to answer must
+	// not slow every connection down.
+	if len(r.servers) > 0 || r.waited {
 		r.mu.Unlock()
 		return
 	}
+	r.waited = true
 	if r.ready == nil {
 		r.ready = make(chan struct{})
 	}
