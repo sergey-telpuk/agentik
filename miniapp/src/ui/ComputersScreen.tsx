@@ -59,10 +59,17 @@ function GetStarted() {
             connect.
           </li>
           <li>
-            Messages between your phone and your Mac are encrypted end to end (Noise protocol). The relay forwards
-            encrypted bytes and cannot read them.
+            Messages between your phone and your Mac are encrypted end to end (Noise protocol) and go over a direct
+            WebRTC connection. The relay only helps the two find each other and never carries your messages.
           </li>
-          <li>Your Mac does not accept incoming connections. The daemon connects outwards.</li>
+          <li>
+            The daemon runs no server: it connects outwards to the relay. A phone that was never paired fails the
+            encrypted handshake.
+          </li>
+          <li>
+            Some networks block direct connections. Your phone then cannot reach your Mac unless you run your own TURN
+            server.
+          </li>
           <li>
             The files are built from the public source by GitHub Actions. Check the SHA256 checksum before you run a
             file.

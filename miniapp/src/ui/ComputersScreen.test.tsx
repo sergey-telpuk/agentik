@@ -132,10 +132,13 @@ describe("ComputersScreen empty state", () => {
       "Paste the invitation or scan the QR code here.",
       "Confirm the pairing with “y” in Terminal on your Mac.",
     ]);
-    expect(block()?.querySelectorAll("ul.bullets li")).toHaveLength(5);
+    expect(block()?.querySelectorAll("ul.bullets li")).toHaveLength(6);
     const text = block()?.textContent ?? "";
     expect(text).toContain("end to end (Noise protocol)");
-    expect(text).toContain("does not accept incoming connections");
+    expect(text).toContain("direct WebRTC connection");
+    expect(text).toContain("never carries your messages");
+    expect(text).toContain("runs no server");
+    expect(text).toContain("your own TURN server");
     expect(text).toContain("not signed by Apple yet");
   });
 
