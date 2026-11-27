@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { decodeBase64, encodeBase64, encodeBase64Url } from "../../encoding";
 import { parseInvitation } from "../../pairing/invitation";
 import { pinnedDeviceFromInvitation } from "../../pairing/pin";
-import { asJson, NOW_MS, NOW_S, validWire } from "../../pairing/testing";
+import { asText, NOW_MS, NOW_S, validWire } from "../../pairing/testing";
 import { generateNoiseKeyPair } from "../../secure/noise";
 import { MemoryBackend } from "../../storage/fakes";
 import { PhoneIdentityStore } from "../../storage/phoneIdentity";
@@ -29,7 +29,7 @@ async function until(check: () => boolean, label: string): Promise<void> {
 /** A live API connected to an in-memory computer that answers with `handler`. */
 async function connected(handler: DaemonHandler): Promise<{ api: AgentikApi; id: string; requests: RpcFrame[] }> {
   const keys = await generateNoiseKeyPair();
-  const parsed = parseInvitation(asJson(validWire({ noise_public_key: encodeBase64Url(keys.publicKey) })), NOW_MS);
+  const parsed = await parseInvitation(asText(validWire({ noise_public_key: encodeBase64Url(keys.publicKey) })), NOW_MS);
   if (!parsed.ok) throw new Error("invalid test wire");
   const backend = new MemoryBackend("secure");
   const store = await PinnedDeviceStore.open({ secure: backend, device: null });
@@ -47,11 +47,16 @@ async function connected(handler: DaemonHandler): Promise<{ api: AgentikApi; id:
     if (frame.method === "session.list") return { result: { sessions: [] } };
     return handler(frame);
   });
+  // One harness: the relay client and the DataChannel must belong to the same link.
+  const relay = attachingRelay();
   const api = createLiveApi({
     store,
     runtime: noTelegramRuntime,
     openIdentityStore: () => PhoneIdentityStore.open({ secure: backend, device: null }),
-    createRelayClient: attachingRelay().createRelayClient,
+    createRelayClient: relay.createRelayClient,
+    openLink: relay.openLink,
+    // jsdom has no RTCPeerConnection, so feature detection would report no support.
+    webRtcSupport: () => ({ supported: true }),
     secureChannel: daemon.secureChannel,
     describeStorage: () =>
       Promise.resolve({ secureStorage: "available", deviceStorage: "unavailable", active: "secure", note: null }),
