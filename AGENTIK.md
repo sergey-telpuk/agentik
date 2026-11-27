@@ -263,7 +263,7 @@ A draft example of an inner command, not a finished public API:
 }
 ```
 
-`project_id` is resolved on the PC against the local project catalogue. An arbitrary path or shell command from the network does not become a daemon launch parameter.
+`project_id` is resolved on the PC against the project catalogue, which is stored in SQLite and survives restarts. `project.add` lets a paired phone permit a directory by path, and `project.remove` withdraws it; `--project` still works and is merged on top at start. This widens the boundary an earlier version drew: a path from the network can now become an agent's working directory, so a phone with access can point an agent at any directory the user running the daemon can reach. Pairing, the Noise handshake, and the local confirmation still decide who may ask. A shell command from the network is still never a launch parameter.
 
 ### 6.3. v0.1 commands
 
@@ -273,6 +273,8 @@ A draft example of an inner command, not a finished public API:
 | `project.list` | Projects available to the current client |
 | `agent.list` | Discovered agents and compatibility status |
 | `session.list` / `session.open` | Working with local sessions |
+| `session.delete` | Deleting one conversation and its turns, permanently |
+| `project.add` / `project.remove` | Permitting a directory, or withdrawing it |
 | `task.start` | Creating a task with a mandatory request ID |
 | `task.get` | Confirmed task state |
 | `task.cancel` | A stop request; not an immediate confirmation of cancellation |
