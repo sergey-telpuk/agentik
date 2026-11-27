@@ -30,6 +30,7 @@ import (
 	"github.com/sergey-telpuk/agentik/daemon/internal/runtime"
 	"github.com/sergey-telpuk/agentik/daemon/internal/storage"
 	"github.com/sergey-telpuk/agentik/daemon/internal/transport"
+	"github.com/sergey-telpuk/agentik/daemon/internal/webrtc"
 )
 
 // version is the release identifier. Release builds override it with
@@ -93,25 +94,26 @@ func (p *projectFlagList) Set(value string) error {
 	return nil
 }
 
-type lateSender struct {
+// lateSignaler lets the acceptor be built before the relay client exists.
+type lateSignaler struct {
 	mu sync.RWMutex
-	fn func(ctx context.Context, connectionID string, data []byte) error
+	fn func(ctx context.Context, connectionID, kind string, data []byte) error
 }
 
-func (l *lateSender) set(fn func(ctx context.Context, connectionID string, data []byte) error) {
+func (l *lateSignaler) set(fn func(ctx context.Context, connectionID, kind string, data []byte) error) {
 	l.mu.Lock()
 	l.fn = fn
 	l.mu.Unlock()
 }
 
-func (l *lateSender) SendFrame(ctx context.Context, connectionID string, data []byte) error {
+func (l *lateSignaler) SendSignal(ctx context.Context, connectionID, kind string, data []byte) error {
 	l.mu.RLock()
 	fn := l.fn
 	l.mu.RUnlock()
 	if fn == nil {
-		return errors.New("transport sender not initialized")
+		return errors.New("signaling relay not initialized")
 	}
-	return fn(ctx, connectionID, data)
+	return fn(ctx, connectionID, kind, data)
 }
 
 func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
@@ -121,7 +123,8 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	dataDir := fs.String("data-dir", "", "directory for identity and database (default: platform data directory)")
 	showVersion := fs.Bool("version", false, "print the daemon version and exit")
 	showStatus := fs.Bool("status", false, "print the device identity, diagnostics, and exit")
-	relayURL := fs.String("relay", defaultRelayURL, "relay WSS base URL")
+	relayURL := fs.String("relay", envOr(envRelayURL, defaultRelayURL),
+		"signaling relay WSS base URL; the relay carries WebRTC signaling only, never application data (env "+envRelayURL+")")
 	relayID := fs.String("relay-id", defaultRelayID, "expected relay identifier")
 	pairOnStart := fs.Bool("pair", false, "print a one-time pairing invitation and QR code on startup")
 	pairTTL := fs.Duration("pair-ttl", defaultPairTTL, "lifetime of newly issued pairing invitations")
@@ -129,6 +132,8 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	codexBin := fs.String("codex-bin", "codex", "path or command name for codex CLI")
 	agentSearchPath := fs.String("agent-search-path", "", "PATH-style list of directories to search for agent CLIs, "+
 		"instead of PATH and the usual install locations")
+
+	rtcFlags := registerWebRTCFlags(fs)
 
 	var configuredProjects projectFlagList
 	fs.Var(&configuredProjects, "project", "permitted project as id=path or path (repeatable)")
@@ -220,6 +225,10 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	if err != nil {
 		return err
 	}
+	iceCfg, err := rtcFlags.iceConfig()
+	if err != nil {
+		return err
+	}
 
 	var outMu sync.Mutex
 	logLine := func(format string, a ...any) {
@@ -244,7 +253,23 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return err
 	}
 
-	sender := &lateSender{}
+	// The relay carries signaling only. Application data goes over the WebRTC
+	// DataChannel, through the acceptor.
+	signaler := &lateSignaler{}
+	acceptor, err := webrtc.NewAcceptor(webrtc.Config{
+		DeviceID:       id.DeviceID(),
+		Signaler:       signaler,
+		ICE:            iceCfg,
+		ConnectTimeout: *rtcFlags.connectTimeout,
+		OnEvent: func(connID, event string) {
+			logLine("webrtc[%s]: %s", connID, event)
+		},
+	})
+	if err != nil {
+		return err
+	}
+	defer acceptor.Close()
+
 	hub, err := runtime.NewHub(
 		id,
 		pairSvc,
@@ -256,7 +281,8 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 			Agents:   map[string]codex.Adapter{codex.AgentName: codexAdapter},
 			Catalog:  catalog,
 		},
-		sender,
+		acceptor,
+		acceptor.Prologue,
 		func(connID string, secErr error) {
 			logLine("secure[%s]: %v", connID, secErr)
 		},
@@ -265,11 +291,12 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return err
 	}
 	defer hub.Close()
+	acceptor.SetSessions(hub.Manager())
+	hub.SetOnSessionClosed(acceptor.CloseConnection)
 
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
-	mgr := hub.Manager()
 	tClient, err := transport.NewClient(transport.Config{
 		RelayURL:        normalizedRelay,
 		Identity:        id,
@@ -283,16 +310,15 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 				}
 			},
 			OnRegistered: func(_ string, connections []string) {
-				mgr.HandleRegistered(runCtx, connections)
+				acceptor.HandleRegistered(runCtx, connections)
 			},
-			OnDisconnected: func() {
-				mgr.HandleDisconnected()
-			},
+			// No OnDisconnected: a DataChannel that is already open does not
+			// depend on the relay, so losing the relay does not end it.
 			OnPeerState: func(connectionID string, present bool) {
-				mgr.HandlePeerState(runCtx, connectionID, present)
+				acceptor.HandlePeerState(runCtx, connectionID, present)
 			},
-			OnFrame: func(connectionID string, data []byte) {
-				mgr.HandleFrame(runCtx, connectionID, data)
+			OnSignal: func(connectionID, kind string, data []byte) {
+				acceptor.HandleSignal(runCtx, connectionID, kind, data)
 			},
 			OnRelayError: func(code, message, connectionID string) {
 				if connectionID != "" {
@@ -306,7 +332,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	if err != nil {
 		return err
 	}
-	sender.set(tClient.SendFrame)
+	signaler.set(tClient.SendSignal)
 
 	var transportWg sync.WaitGroup
 	transportErrCh := make(chan error, 1)

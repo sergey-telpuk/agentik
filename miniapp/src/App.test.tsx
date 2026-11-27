@@ -3,7 +3,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { createLiveApi } from "./api/live/liveApi";
-import { FakeSocket, noiseDaemon, sessionEvent, type NoiseDaemon } from "./api/live/testing";
+import { attachingRelay, FakeSocket, noiseDaemon, sessionEvent, type NoiseDaemon } from "./api/live/testing";
+import type { OpenLink } from "./api/live/connection";
 import { decodeBase32, encodeBase64Url } from "./encoding";
 import { asJson, NOW_MS, validWire } from "./pairing/testing";
 import type { TaskView } from "./protocol/messages";
@@ -54,6 +55,7 @@ function services(
   backend: MemoryBackend | null,
   wiring: {
     readonly createRelayClient: (device: PinnedDevice) => RelayClient;
+    readonly openLink?: OpenLink;
     readonly secureChannel: SecureChannelFactory;
   } = { createRelayClient: silentRelay, secureChannel: noiseChannelFactory },
 ): AppServices {
@@ -67,6 +69,8 @@ function services(
         runtime: noTelegramRuntime,
         openIdentityStore: () => PhoneIdentityStore.open({ secure: backend, device: null }),
         createRelayClient: wiring.createRelayClient,
+        openLink: wiring.openLink ?? attachingRelay().openLink,
+        webRtcSupport: () => ({ supported: true }),
         secureChannel: wiring.secureChannel,
         describeStorage: () => Promise.resolve(storageFromPersistence(store)),
         appVersion: "0.0.0-test",
@@ -231,7 +235,7 @@ describe("App", () => {
     daemons.push(daemon);
 
     const backend = new MemoryBackend("secure");
-    await render(services(backend, { createRelayClient: daemon.relay.createRelayClient, secureChannel: noiseChannelFactory }));
+    await render(services(backend, { ...daemon.relay.wiring, secureChannel: noiseChannelFactory }));
     await click("Connect a computer");
     await type(asJson(wire));
     await click("Check invitation");

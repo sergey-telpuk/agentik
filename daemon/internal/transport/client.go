@@ -37,7 +37,7 @@ type Status struct {
 	LastError   string
 }
 
-// Handlers receives relay lifecycle and frame events synchronously from the
+// Handlers receives relay lifecycle and signaling events synchronously from the
 // active socket's read loop or state transitions. Implementations must return
 // promptly and not block indefinitely.
 type Handlers struct {
@@ -45,7 +45,7 @@ type Handlers struct {
 	OnRegistered   func(deviceID string, connections []string)
 	OnDisconnected func()
 	OnPeerState    func(connectionID string, present bool)
-	OnFrame        func(connectionID string, data []byte)
+	OnSignal       func(connectionID, kind string, data []byte)
 	OnRelayError   func(code, message, connectionID string)
 }
 
@@ -308,7 +308,7 @@ func (c *Client) runOnce(ctx context.Context, generation uint64) runOutcome {
 		}
 	}
 
-	// Route is now active: publish conn for SendFrame and notify handlers.
+	// Route is now active: publish conn for SendSignal and notify handlers.
 	c.setActiveConn(conn)
 	c.setStatus(Status{
 		State:   StateConnected,
@@ -474,16 +474,16 @@ func (c *Client) readLoop(ctx context.Context, ws *websocket.Conn, pongCh chan<-
 			if c.cfg.Handlers.OnPeerState != nil {
 				c.cfg.Handlers.OnPeerState(msg.ConnectionID, *msg.Present)
 			}
-		case "frame":
-			if msg.ConnectionID == "" {
+		case "signal":
+			if msg.ConnectionID == "" || !ValidInboundSignalKind(msg.Kind) {
 				continue
 			}
 			data, err := decodeStdBase64(msg.Data)
-			if err != nil || len(data) == 0 || len(data) > MaxFrameBytes {
+			if err != nil || len(data) == 0 || len(data) > MaxSignalBytes {
 				continue
 			}
-			if c.cfg.Handlers.OnFrame != nil {
-				c.cfg.Handlers.OnFrame(msg.ConnectionID, data)
+			if c.cfg.Handlers.OnSignal != nil {
+				c.cfg.Handlers.OnSignal(msg.ConnectionID, msg.Kind, data)
 			}
 		case "error":
 			if c.cfg.Handlers.OnRelayError != nil {
@@ -568,17 +568,23 @@ func (c *Client) clearActiveConn(conn *activeConn) {
 	c.mu.Unlock()
 }
 
-// SendFrame forwards one opaque payload frame to the client identified by
+// SendSignal forwards one opaque signaling payload to the client identified by
 // connectionID over the currently registered relay connection.
-func (c *Client) SendFrame(ctx context.Context, connectionID string, data []byte) error {
+//
+// This is the only thing the daemon sends through the relay besides its
+// registration and keepalive. There is no method for application data.
+func (c *Client) SendSignal(ctx context.Context, connectionID, kind string, data []byte) error {
 	if !ValidConnectionID(connectionID) {
 		return ErrInvalidConnectionID
 	}
-	if len(data) == 0 {
-		return ErrFrameEmpty
+	if !validDeviceSignalKind(kind) {
+		return ErrSignalKind
 	}
-	if len(data) > MaxFrameBytes {
-		return ErrFrameTooLarge
+	if len(data) == 0 {
+		return ErrSignalEmpty
+	}
+	if len(data) > MaxSignalBytes {
+		return ErrSignalTooLarge
 	}
 
 	c.mu.RLock()
@@ -588,8 +594,9 @@ func (c *Client) SendFrame(ctx context.Context, connectionID string, data []byte
 		return ErrNotConnected
 	}
 
-	wire := outboundFrame{
-		Type:         "frame",
+	wire := outboundSignal{
+		Type:         "signal",
+		Kind:         kind,
 		Data:         base64.StdEncoding.EncodeToString(data),
 		ConnectionID: connectionID,
 	}
@@ -598,7 +605,22 @@ func (c *Client) SendFrame(ctx context.Context, connectionID string, data []byte
 		return err
 	}
 	if err := conn.writeText(ctx, payload); err != nil {
-		return fmt.Errorf("transport: send frame: %w", err)
+		return fmt.Errorf("transport: send signal: %w", err)
 	}
 	return nil
+}
+
+func validDeviceSignalKind(kind string) bool {
+	for _, k := range DeviceSignalKinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidInboundSignalKind reports whether kind is one a client may send to the
+// daemon.
+func ValidInboundSignalKind(kind string) bool {
+	return kind == SignalOffer || kind == SignalICE
 }

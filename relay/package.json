@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Agentik relay: forwards encrypted frames between a paired phone and computer",
+  "description": "Agentik relay: forwards WebRTC signaling between a paired phone and computer",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",

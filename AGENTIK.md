@@ -13,7 +13,7 @@
 
 Agentik is an application inside Telegram for remotely controlling AI agents on your own computer. The user installs the local application once, pairs their phone, and then selects a computer, a project, and a task in the graphical interface of a Telegram Mini App.
 
-**Core promise:** task execution, projects, and persistent history live on the user's computer. A shared cloud service forwards messages encrypted between the Mini App and the computer, and stores no task history.
+**Core promise:** task execution, projects, and persistent history live on the user's computer. All application data flows directly between the Mini App and the computer over WebRTC, end-to-end encrypted. A shared cloud service only helps the two find each other (signaling) and stores no task history.
 
 The product is built from scratch. Using libraries, standard protocols, and official agent interfaces is allowed; no competitor's codebase is used.
 
@@ -24,20 +24,26 @@ The product is built from scratch. Using libraries, standard protocols, and offi
 | Primary interface | Telegram Mini App, React and TypeScript |
 | Local application | Go, a separate self-contained build for each supported platform |
 | Local state | SQLite; keys in the OS secure store where one is available |
-| Remote transport | Outbound WebSocket connections over HTTPS/WSS |
-| Cloud component | A single relay on Cloudflare Workers and Durable Objects |
-| End-to-end encryption | Noise between the Mini App and the local application |
+| Remote transport | WebRTC `RTCDataChannel` (reliable, ordered) between the Mini App and the local application. All application data uses it and nothing else |
+| Cloud component | A single relay on Cloudflare Workers and Durable Objects, used for signaling only: SDP offer and answer, ICE candidates, the ICE server list, device registration and presence. It never carries application data |
+| NAT traversal | STUN and TURN servers are configured by URL on the computer. TURN is optional, but a network pair with no direct path cannot connect without one. The user runs it (for example coturn on their own VPS); no provider is built in |
+| Fallback | None. If the DataChannel cannot open, the connection fails with a stated reason. The relay never forwards application data |
+| End-to-end encryption | Noise over the DataChannel, with both DTLS fingerprints bound into the Noise prologue |
 | First agent | Codex installed and authorized on the PC, over App Server via stdio |
 | Distribution | GitHub Releases; the Mini App offers only builds actually published |
 | Development | Documentation and subsequent implementation in `main`, no force push |
 
-WebRTC, Pion, STUN, TURN, MQTT, Nostr, and a separate push provider are not used in this version. All remote traffic passes through the relay in encrypted form. This is the chosen trade-off for simple, predictable connectivity.
+The computer side uses Pion WebRTC; the Mini App uses the WebView's `RTCPeerConnection`. MQTT, Nostr, and a separate push provider are not used in this version. Cloudflare TURN is not used.
+
+This reverses the earlier decision to pass all remote traffic through the relay. The chosen trade-off is that the relay carries only small signaling messages and the data path is direct (or through the user's own TURN), at the price that a pair of networks with no direct path and no TURN server cannot connect at all. The user accepts that; there is no relay data fallback.
 
 ### 1.2. Limits of the promise
 
-- A shared cloud relay exists; the user does not deploy their own server.
+- A shared signaling relay exists; the user does not deploy their own signaling server. A TURN server is optional and, if wanted, is the user's own.
+- Without a direct network path between the phone and the computer, and without a working TURN server, the connection fails. There is no relay fallback.
 - The phone stores its own access key and the list of paired computers. The displayed data is also held in the Mini App's memory.
-- The relay provider sees network addresses, timing, sizes, and other connection metadata.
+- The relay provider sees signaling metadata: the network addresses in ICE candidates, timing, and signal sizes. It sees no application data, which never crosses it.
+- The phone and the computer see each other's network addresses on a direct path. A TURN operator, if one is used, sees addresses, timing, and sizes of encrypted traffic, not its content.
 - Codex and other cloud agents may send context to their AI provider. Running an agent locally does not mean the model runs locally.
 - The computer must be powered on and connected to the network, and the local application must be running. Waking a sleeping or powered-off PC is out of scope for the first version.
 - Free infrastructure quotas do not mean free operation at any scale, and do not cover the cost of models or of installer signing.
@@ -104,13 +110,17 @@ The application runs with ordinary user privileges. Autostart is enabled explici
 
 ### 3.3. Relay
 
-The relay accepts outbound WSS connections from the computer and the Mini App, authenticates route registration, and forwards packets. It does not run commands and does not receive Noise keys.
+The relay is a signaling service. It accepts outbound WSS connections from the computer and the Mini App, authenticates route registration, and forwards small opaque signaling payloads between one phone connection and the computer: the SDP offer and answer, ICE candidates, and the computer's ICE server list. It does not run commands, does not receive Noise keys, and carries no application data.
+
+Signal kinds are fixed and directional: a phone may send `offer` and `ice`; the computer may send `answer`, `ice`, and `ice_servers`. The relay checks the kind, the size (32 KiB), and the direction, rate-limits each connection, and forwards the payload without interpreting it. There is no frame or data message type: a legacy `frame` message is rejected as an unknown type, so the relay cannot be used as a data path even by a modified client.
 
 One Durable Object serves the connections of one computer. Its address is derived deterministically from the device identifier. No separate device-to-object mapping table is required.
 
-Only the data needed for current connections is allowed on the relay side: roles, public identifiers, limits, challenges, and short-lived routes. User messages are not written to the Storage API or to logs. Connection attachments can survive hibernation; it cannot be promised that infrastructure metadata exists only in RAM. [S3]
+Only the data needed for current connections is allowed on the relay side: roles, public identifiers, limits, challenges, and short-lived routes. Signaling payloads are not written to the Storage API or to logs. Connection attachments can survive hibernation; it cannot be promised that infrastructure metadata exists only in RAM. [S3]
 
 The Hibernation WebSocket API is used. An open channel can persist while the handler is evicted; a message activates processing. Keepalive is implemented with platform facilities, without persistent server-side timers that would prevent hibernation. [S3]
+
+Registration, the challenge, `attach`, and presence (`peer_state`) are unchanged. The phone leaves the relay as soon as its DataChannel is open; an open DataChannel does not depend on the relay afterwards.
 
 ## 4. Storage and entities
 
@@ -204,7 +214,7 @@ The baseline profile for verifying the implementation is `Noise_XX_25519_ChaChaP
 
 The phone checks the PC's key after the second XX message; the daemon checks the phone's key after the third. Agent commands are accepted only after the full handshake and local authorization. Commands in early handshake payloads and 0-RTT are not supported.
 
-The prologue binds the Agentik protocol, the version, the roles, and the target computer. The connection context is negotiated and verified so that messages cannot be replayed across different channels. After any reconnect a new handshake is performed; old nonces and transport keys are not restored.
+The prologue binds the Agentik protocol, the version, the roles, the target computer, and the two DTLS certificate fingerprints of the WebRTC connection (section 6.4). The connection context is verified so that messages cannot be replayed across different channels, and so that a party on the signaling path who swapped a fingerprint makes the handshake fail. After any reconnect a new WebRTC connection and a new handshake are performed; old nonces and transport keys are not restored.
 
 Cryptographic primitives are not implemented in-house. A Go library with a shared native/WASM build is a candidate for the implementation, not an already-vetted dependency. Test vectors and compatibility with the target Telegram WebViews are required before a version is fixed.
 
@@ -212,10 +222,11 @@ Cryptographic primitives are not implemented in-house. A Go library with a share
 
 | Layer | Permitted content |
 | --- | --- |
-| Outer relay envelope | Version, opaque device ID, connection ID, transport type, ciphertext |
+| Relay signaling message | Message type, signal kind (`offer`, `answer`, `ice`, `ice_servers`), opaque base64 payload (SDP, ICE candidate, ICE servers); never application data |
+| DataChannel message | One Noise handshake message or one Noise ciphertext frame, at most 32 KiB, binary |
 | Inner Noise message | Command, project parameters, task, text, result, diff, approval |
 
-Outer fields contain no local paths, project names, prompts, or results. The envelope determines routing, not authority; authority is checked by the PC.
+Signaling payloads contain no local paths, project names, prompts, or results. They determine how two peers connect, not what authority they have; authority is checked by the PC.
 
 A draft example of an inner command, not a finished public API:
 
@@ -257,6 +268,38 @@ A session maps to one agent thread. `task.start` with `session_id: null` creates
 
 Method names and the JSON Schema are fixed before clients are implemented. An unknown version, method, extra dangerous parameters, or exceeded limits produce an explicit error.
 
+### 6.4. WebRTC data path
+
+**Roles.** The phone is the offerer and the computer is the answerer. The phone opens one reliable, ordered DataChannel labelled `agentik`; the computer accepts only that channel. Text messages and messages over 32 KiB close the peer.
+
+**Connection setup.** Signaling uses trickle ICE over the relay:
+
+1. The phone attaches to the relay for a computer. The relay tells the computer a client is present.
+2. The computer sends `ice_servers`: its STUN URLs and, if TURN is configured, a TURN URL with time-limited credentials.
+3. The phone creates an `RTCPeerConnection` with those servers, creates the DataChannel and an offer, and sends `offer`, then its ICE candidates as `ice`.
+4. The computer sets the offer, creates the answer, binds the fingerprints (below), sends `answer`, then its candidates.
+5. When the DataChannel opens, the phone leaves the relay. Noise XX runs over the DataChannel, then the inner protocol (including `auth.telegram` and `pair.submit`, which therefore never touch the relay).
+
+The daemon limits concurrent peers, drops a peer whose DataChannel has not opened within a connect timeout, and drops one that stops draining its queue.
+
+**TURN credentials.** TURN uses coturn's `use-auth-secret` scheme: the username is `<expiry unix seconds>:<label>` and the password is `base64(HMAC-SHA1(secret, username))`. The shared secret stays on the computer; only derived, time-limited credentials are sent to the phone. Because the `ice_servers` signal is sent to whoever attaches to the relay for that device identifier, anyone who knows a device identifier can obtain short-lived TURN credentials. This is mitigated, not prevented: credentials expire quickly (10 minutes by default), the computer issues credentialed lists at most 30 times per minute and falls back to STUN only beyond that, and the TURN server must set its own per-user quotas. A TURN operator who sees the credentials can relay encrypted traffic only; it cannot read or forge it.
+
+**Fingerprint binding.** Each side reads the DTLS certificate fingerprint declared in the SDP it sent and the one it received (SHA-256 only; an SDP with several different fingerprints, or none, is refused). The Noise prologue is the canonical encoding of the context `agentik-noise-webrtc-prologue-v1`, the version, the roles `client` and `device`, the `device_id`, the phone's fingerprint, and the computer's fingerprint, in that order. DTLS alone authenticates only the fingerprint it was told, and the signaling path is not trusted: a relay or network attacker who rewrites both SDPs can terminate DTLS toward each side with its own certificate. The phone's and the computer's views of the two fingerprints then differ, so the prologues differ and the Noise handshake fails at the second message, before any application byte or phone identity is sent. The pinned computer key then binds the Noise static key to the right computer. The prologue encoding is pinned by a cross-language test vector (Go and TypeScript).
+
+**No fallback.** If the DataChannel cannot open, the Mini App reports a failure with a reason and does not retry through the relay: `webrtc_unsupported` (the WebView has no `RTCPeerConnection`), `ice_failed` (ICE failed or the channel did not open in time, with no candidate pair), `relay_unreachable` (signaling could not be carried), `computer_offline`, or, after the channel was open, `link_lost`. The user can retry, which starts a new negotiation. The relay has no data message type, the daemon's relay client has no call that sends one, and the Mini App's relay client sends only `offer` and `ice`.
+
+**Lifetime.** An open DataChannel survives the phone leaving the relay and the computer's relay connection dropping and re-registering. A closed DataChannel ends the session; recovery is a new negotiation, a new handshake, and `events.resume` (section 7.3).
+
+**Configuration.** Nothing is tied to a provider.
+
+| Where | Setting |
+| --- | --- |
+| Computer | `--relay` (env `AGENTIK_RELAY_URL`): the signaling URL carried in invitations |
+| Computer | `--stun` (env `AGENTIK_STUN_URLS`), `--turn` (env `AGENTIK_TURN_URLS`): repeatable or comma-separated URLs |
+| Computer | `--turn-secret-file` (env `AGENTIK_TURN_SECRET_FILE` or `AGENTIK_TURN_SECRET`): the coturn shared secret; required with `--turn`, never a command-line value |
+| Computer | `--turn-ttl` (env `AGENTIK_TURN_TTL`), `--connect-timeout` (env `AGENTIK_CONNECT_TIMEOUT`) |
+| Mini App build | `VITE_AGENTIK_STUN_URLS`: extra static STUN URLs; `VITE_AGENTIK_CONNECT_TIMEOUT_MS`, `VITE_AGENTIK_ICE_SERVERS_WAIT_MS`. TURN is not configured here: the computer supplies credentials |
+
 ## 7. Tasks, deduplication, and recovery
 
 ### 7.1. Task states
@@ -287,13 +330,13 @@ The `accepted` acknowledgement is sent after the command has been successfully w
 
 ### 7.3. Connection recovery
 
-A working connection passes through the states `disconnected`, `relay_connected`, `handshaking`, `authenticated`, `synchronizing`, `ready`.
+A working connection passes through the states `disconnected`, `signaling` (relay attached, offer and answer exchanged), `link_open` (DataChannel open, relay released), `handshaking`, `authenticated`, `synchronizing`, `ready`.
 
-On a disconnect the agent keeps running as long as the PC and the daemon are running. The client reconnects with bounded exponential backoff and jitter, authenticates again, and requests events after the last processed sequence number.
+On a disconnect the agent keeps running as long as the PC and the daemon are running. A closed DataChannel ends the Mini App's attempt with `link_lost` and a Retry action; a retry runs signaling, a new DTLS connection, a new handshake, authentication, and a request for events after the last processed sequence number. Signaling reconnects while the channel is still opening use bounded exponential backoff and jitter.
 
 Sequence numbers are monotonic within a session. If old events were removed by the local retention policy, the PC returns a state snapshot and a new cursor. The interface does not substitute missing events with a claim that the task finished successfully.
 
-A relay restart must not affect local execution. A daemon restart is a separate failure scenario: whether the process survives and whether control can be recovered depends on the agent and the OS, and must be verified.
+A relay restart or outage must not affect local execution or an already open DataChannel; new connections wait for signaling to return. A daemon restart is a separate failure scenario: whether the process survives and whether control can be recovered depends on the agent and the OS, and must be verified.
 
 ### 7.4. Approvals
 
@@ -327,16 +370,17 @@ The following are required before a public launch:
 
 - limits on the number of unauthorized and active connections;
 - short lifetimes for challenges, handshakes, and unused channels;
-- limits on packet size, message rate, and queue depth;
+- limits on signal size, signal rate, and queue depth on the relay, and on frame size and queued bytes on the DataChannel;
+- a cap on how often credentialed TURN lists are issued, and quotas on the TURN server;
 - backpressure or disconnection of a slow receiver instead of accumulating data;
 - protection against evicting a registered computer;
 - Telegram identity verification and admission rules for public clients;
 - limits per source, per device, and on total resource consumption;
 - error logging without task content, secrets, or invitations.
 
-The outer packet has an upper bound; large results are transferred in parts. For the first prototype one can start with a 32 KiB frame payload, a bounded 256 KiB queue per connection, and a limited number of channels per device. These are design starting points, not measured capacity; the final values are fixed after backpressure testing and Noise compatibility checks.
+Both a relay signal and a DataChannel frame have a 32 KiB upper bound; large results are transferred in parts. The relay keeps a bounded queue per connection and rate-limits signals (120 per second per client, four times that for the computer). The computer limits concurrent peers per device and closes a peer whose DataChannel has more than 256 KiB queued. These are design starting points, not measured capacity; the final values are fixed after backpressure testing and Noise compatibility checks.
 
-The relay is not a cloud queue: if the PC is unreachable, a new task is not considered accepted and no later delivery is promised. After the Mini App is closed, the local runtime stores events on the PC rather than streaming continuously into an empty channel.
+The relay is not a cloud queue and not a data path: if the PC is unreachable, or the DataChannel cannot open, a new task is not considered accepted and no later delivery is promised. After the Mini App is closed, the local runtime stores events on the PC rather than streaming continuously into an empty channel.
 
 ### 9.1. Free infrastructure
 
@@ -351,6 +395,8 @@ As of the document date, the following terms are officially documented:
 | Exceeding DO Free quotas | The corresponding operations return errors |
 
 Sources: [S3, S4, S5]. The limits apply to different resources and do not add up to a single quota. The DO free plan uses the SQLite-backed class; this does not require writing application history into its Storage API.
+
+Because application data no longer crosses the relay, Durable Object message billing is driven by signaling alone: a handful of messages per connection setup rather than every task event.
 
 The number of supported users is determined by load testing. It cannot be derived from the number of open sockets alone. Active sessions, message size and rate, object runtime, reconnects, and abuse handling all matter. In the interface, a quota failure must be shown as transport unavailability, not as loss of local history.
 
@@ -377,12 +423,13 @@ Auto-update does not replace the binary while a task is active. A new version is
 | `daemon/internal/identity` | PC identity and local key storage |
 | `daemon/internal/pairing` | Client pairing and revocation |
 | `daemon/internal/secure` | Wrapper around the Noise library |
-| `daemon/internal/transport` | WSS, reconnect, limits, and packet exchange |
+| `daemon/internal/transport` | Relay WSS client: registration, reconnect, limits, and signaling exchange |
+| `daemon/internal/webrtc` | Pion peer: offers, DataChannel, DTLS fingerprints, ICE servers, and TURN credentials |
 | `daemon/internal/runtime` | Tasks, sessions, approvals, and recovery |
 | `daemon/internal/agents/codex` | Codex App Server adapter |
 | `daemon/internal/storage` | SQLite and migrations |
 | `daemon/internal/projects` | Permitted projects and path validation |
-| `miniapp` | React/TypeScript Mini App |
+| `miniapp` | React/TypeScript Mini App; `src/webrtc` holds the peer link, fingerprint binding, and feature detection |
 | `relay` | Cloudflare Worker and Durable Object |
 | `protocol` | Message schemas, versions, and test vectors |
 | `scripts` | Build, verification, and release preparation |
@@ -394,7 +441,7 @@ This is the target structure, not a list of files that already exist. Dependency
 
 ### Stage 1. Secure connection
 
-A relay with computer registration, the Go client, a minimal Mini App, Noise, QR pairing, and local confirmation. No OS commands are run at this stage: the exchange of test data, revocation, and reconnection are what get verified.
+A signaling relay with computer registration, the Go client, a minimal Mini App, a WebRTC DataChannel, Noise over it, QR pairing, and local confirmation. No OS commands are run at this stage: the exchange of test data, revocation, and reconnection are what get verified.
 
 Done when: the phone and the PC exchange secure messages; the relay cannot see the payload; a foreign key, a pin substitution, and a replayed invitation are all rejected.
 
@@ -427,8 +474,8 @@ Done when: a new user completes installation and pairing without their own Bot T
 | Repeated task.start | The original task is returned, including when the first response was lost |
 | Request ID conflict | Changed content is rejected |
 | Closing the Mini App | Work continues on the PC; after reopening, the actual result is available |
-| Network change | A new secure connection restores the previous session |
-| Relay restart | Local tasks and history survive; clients authenticate again |
+| Network change | A new WebRTC connection and Noise handshake restore the previous session |
+| Relay restart | Local tasks and history survive; open DataChannels keep working; new connections wait for signaling |
 | Daemon crash | State is reconciled; an indeterminate launch is not retried automatically |
 | Failure between launch and write | No false guarantee of exactly-once or of success |
 | Stop | `cancelled` is shown after a confirmed stop |
@@ -436,8 +483,14 @@ Done when: a new user completes installation and pairing without their own Bot T
 | Slow client | Queues are bounded, memory does not grow without limit |
 | Dangerous agent output | Content is not executed as HTML/JavaScript |
 | Secure storage unavailable | No hidden persistence of a long-term secret in localStorage |
-| Logs | Prompts, results, and private keys are absent from server logs |
+| Logs | Prompts, results, signaling payloads, and private keys are absent from server logs |
 | New phone | New pairing is required; a Telegram account alone grants no access |
+| Swapped DTLS fingerprint on signaling | The Noise handshake fails; no session and no application data |
+| Direct path impossible and no TURN | A clear failure with the reason (ICE failed, no candidate pair); no retry through the relay |
+| Failed DataChannel | No application frame reaches the relay; the relay carries signaling only |
+| WebView without `RTCPeerConnection` | A clear "unsupported" failure; no other transport is tried |
+| Relay outage after connecting | The open session continues |
+| TURN credentials | Time-limited; the shared secret never leaves the computer |
 
 The checks are run on real Telegram Android/iOS clients and on every declared PC platform. Paths with spaces and Unicode, file permissions, stopping child processes, and restarting the application are verified separately. Controlled fault injection points are used for the crash scenarios.
 
@@ -446,7 +499,10 @@ The checks are run on real Telegram Android/iOS clients and on every declared PC
 The architecture is settled; the following are technical verification items for the implementation:
 
 - the specific Noise library, its version, and native/WASM compatibility;
-- the final formats of the QR code, the signed structures, and the Noise prologue;
+- the final formats of the QR code and the signed structures (the WebRTC Noise prologue is pinned by a cross-language vector);
+- WebRTC through real NATs, TURN relaying, and `RTCPeerConnection` behaviour inside the Telegram Android and iOS WebViews;
+- Cloudflare reachability from a phone without a VPN, and the Telegram WebView's connection policy for WebRTC and STUN/TURN;
+- abuse limits for `ice_servers` credential issuance in a public deployment;
 - secure storage availability and WebView behaviour across the Telegram matrix;
 - the supported Codex version and thread recovery after a crash;
 - actual sandbox capabilities on each OS;
@@ -473,3 +529,7 @@ Public capabilities and pricing were checked on 27 November 2026. Agentik's own 
 - **S5. Cloudflare Workers pricing and Static Assets:** <https://developers.cloudflare.com/workers/platform/pricing/>; <https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/>
 - **S6. Noise Protocol Framework:** the XX handshake, transport encryption, and application responsibilities. <https://noiseprotocol.org/noise.html>
 - **S7. Codex App Server:** the local interface, stdio, threads, turns, and events. <https://developers.openai.com/codex/app-server>
+- **S8. Pion WebRTC:** the Go WebRTC implementation used by the daemon. <https://github.com/pion/webrtc>
+- **S9. RFC 8827, WebRTC Security Architecture:** DTLS-SRTP, certificate fingerprints in signaling, and the role of the signaling channel. <https://www.rfc-editor.org/rfc/rfc8827>
+- **S10. RFC 8656, TURN:** relaying through a server for networks without a direct path. <https://www.rfc-editor.org/rfc/rfc8656>
+- **S11. coturn:** the `use-auth-secret` time-limited credential scheme. <https://github.com/coturn/coturn>

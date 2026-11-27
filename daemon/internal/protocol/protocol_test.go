@@ -472,3 +472,36 @@ func TestRoleValid(t *testing.T) {
 		t.Fatal("undefined role accepted")
 	}
 }
+
+// TestNoiseWebRTCPrologueCrossLanguageVector pins the byte layout the Mini App
+// reproduces in miniapp/src/webrtc/prologue.test.ts. Change both together.
+func TestNoiseWebRTCPrologueCrossLanguageVector(t *testing.T) {
+	deviceID, err := hex.DecodeString("56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq := func(from byte) []byte {
+		out := make([]byte, DTLSFingerprintSize)
+		for i := range out {
+			out[i] = from + byte(i)
+		}
+		return out
+	}
+	got, err := NoiseWebRTCPrologue(Version, RoleClient, RoleDevice, deviceID, seq(0x01), seq(0x21))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "000000206167656e74696b2d6e6f6973652d7765627274632d70726f6c6f6775652d7631000100000006636c69656e74000000066465766963650000002056475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c000000200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20000000202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40"
+	if hex.EncodeToString(got) != want {
+		t.Fatalf("prologue = %x", got)
+	}
+	// Swapping the two fingerprints must change the bytes: the binding is
+	// ordered (initiator, then responder).
+	swapped, err := NoiseWebRTCPrologue(Version, RoleClient, RoleDevice, deviceID, seq(0x21), seq(0x01))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(got, swapped) {
+		t.Fatal("swapped fingerprints produce the same prologue")
+	}
+}

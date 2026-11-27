@@ -2,8 +2,10 @@
  * Real Noise_XX_25519_ChaChaPoly_SHA256 initiator built on the pinned
  * `@richardhopton/noise-c.wasm` (rweather/noise-c compiled to WASM).
  *
- * Matches the Go daemon's `daemon/internal/secure` and
- * `daemon/internal/protocol` prologue (`NoisePrologue`). No commands or early
+ * Matches the Go daemon's `daemon/internal/secure`. The handshake runs over
+ * the WebRTC DataChannel and its prologue is supplied by the caller: in
+ * production `webrtcPrologue` (`src/webrtc/prologue.ts`), which binds both DTLS
+ * fingerprints so a swapped fingerprint makes the handshake fail. No commands or early
  * payloads are ever exchanged during the handshake; the daemon's static X25519
  * public key is verified against the pinned key immediately after handshake
  * message 2 before message 3 is written.
@@ -17,8 +19,7 @@ import createNoise, {
 } from "@richardhopton/noise-c.wasm";
 import wasmUrl from "@richardhopton/noise-c.wasm/src/noise-c.wasm?url";
 import { bytesEqual } from "../encoding";
-import type { FrameTransport } from "../relay/frame-transport";
-import { DEFAULT_MAX_FRAME_BYTES } from "../relay/client";
+import { MAX_FRAME_BYTES, type FrameTransport } from "../relay/frame-transport";
 import type { SecureChannelFactory, SecureChannelParams, SecureSession } from "./seam";
 
 export const NOISE_PROTOCOL_NAME = "Noise_XX_25519_ChaChaPoly_SHA256";
@@ -28,7 +29,7 @@ export const NOISE_ROLE_INITIATOR = "client";
 export const NOISE_ROLE_RESPONDER = "device";
 export const NOISE_KEY_SIZE = 32;
 export const NOISE_MAC_SIZE = 16;
-export const MAX_RELAY_PLAINTEXT_SIZE = DEFAULT_MAX_FRAME_BYTES - NOISE_MAC_SIZE;
+export const MAX_PLAINTEXT_SIZE = MAX_FRAME_BYTES - NOISE_MAC_SIZE;
 export const DEFAULT_NOISE_HANDSHAKE_TIMEOUT_MS = 15_000;
 
 const EMPTY_AD = new Uint8Array(0);
@@ -67,8 +68,10 @@ export interface NoiseKeyPair {
 }
 
 /**
- * Encodes the canonical prologue matching `protocol.NoisePrologue(1, "client", "device", deviceID)`
- * in `daemon/internal/protocol`.
+ * The legacy prologue without fingerprints, matching `protocol.NoisePrologue`.
+ * It is not used on any connection; it stays so the cross-language Noise
+ * vector (`daemon/internal/secure/vector_test.go`) keeps proving that the
+ * handshake bytes match. Connections use `webrtcPrologue`.
  */
 export function devicePrologue(deviceId: Uint8Array): Uint8Array {
   if (deviceId.length !== 32) {
@@ -174,8 +177,8 @@ class NoiseSecureSession implements SecureSession {
 
   send(plaintext: Uint8Array): void {
     if (this.#closed) throw new NoiseSessionClosedError();
-    if (plaintext.length > MAX_RELAY_PLAINTEXT_SIZE) {
-      throw new NoisePayloadTooLargeError(plaintext.length, MAX_RELAY_PLAINTEXT_SIZE);
+    if (plaintext.length > MAX_PLAINTEXT_SIZE) {
+      throw new NoisePayloadTooLargeError(plaintext.length, MAX_PLAINTEXT_SIZE);
     }
     const ciphertext = this.#sendCipher.EncryptWithAd(EMPTY_AD, plaintext);
     try {
@@ -227,8 +230,8 @@ export function createNoiseChannelFactory(
 
   return {
     async open(params: SecureChannelParams): Promise<SecureSession> {
-      if (params.deviceId.length !== 32) {
-        throw new NoiseHandshakeError("deviceId must be 32 bytes");
+      if (params.prologue.length === 0) {
+        throw new NoiseHandshakeError("a prologue binding the connection is required");
       }
       if (params.pinnedNoisePublicKey.length !== NOISE_KEY_SIZE) {
         throw new NoiseHandshakeError("pinnedNoisePublicKey must be 32 bytes");
@@ -245,7 +248,7 @@ export function createNoiseChannelFactory(
         throw new NoiseHandshakeError("Noise handshake aborted");
       }
 
-      const prologue = devicePrologue(params.deviceId);
+      const prologue = params.prologue;
       const hs: NoiseHandshakeState = new noise.HandshakeState(
         NOISE_PROTOCOL_NAME,
         noise.constants.NOISE_ROLE_INITIATOR,

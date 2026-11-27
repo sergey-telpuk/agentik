@@ -62,7 +62,14 @@ export type ConnectionState =
 
 export type ConnectFailure =
   | "computer_offline"
+  /** The relay could not carry the signaling. */
   | "relay_unreachable"
+  /** This WebView has no RTCPeerConnection; there is no other data path. */
+  | "webrtc_unsupported"
+  /** The DataChannel could not open (ICE failed, no candidate pair, timeout). */
+  | "ice_failed"
+  /** The open DataChannel closed. */
+  | "link_lost"
   | "handshake_failed"
   | "key_mismatch"
   /** The computer does not (or no longer) recognise this phone, or refused the pairing. */

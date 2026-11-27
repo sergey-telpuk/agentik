@@ -31,6 +31,11 @@ const (
 	// ContextNoisePrologue binds a Noise handshake to this protocol, the
 	// peer roles, and the target device.
 	ContextNoisePrologue = "agentik-noise-prologue-v1"
+	// ContextNoiseWebRTCPrologue is the prologue context for a Noise
+	// handshake run over a WebRTC DataChannel. It extends the base prologue
+	// with the DTLS certificate fingerprints of both peers, so a handshake
+	// completes only when both sides saw the same two fingerprints.
+	ContextNoiseWebRTCPrologue = "agentik-noise-webrtc-prologue-v1"
 )
 
 // maxFieldLen bounds a single canonical field. Signed structures carry keys,

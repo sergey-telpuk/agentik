@@ -16,7 +16,7 @@ import {
 import { QueueLedger, type Receiver, sendWithinBudget } from "../src/backpressure";
 import type { DeviceRoom } from "../src/device-room";
 import { LIMITS } from "../src/limits";
-import { frameMessage, serializeServerMessage } from "../src/messages";
+import { signalMessage, serializeServerMessage } from "../src/messages";
 import { encodeBase64 } from "../src/protocol";
 
 type Attachment = Record<string, unknown>;
@@ -39,7 +39,7 @@ function fill(ws: WebSocket, size: number): void {
 
 /** A client frame message carrying `size` payload bytes. */
 function clientFrame(size: number): string {
-  return JSON.stringify({ type: "frame", data: encodeBase64(new Uint8Array(size)) });
+  return JSON.stringify({ type: "signal", kind: "ice", data: encodeBase64(new Uint8Array(size)) });
 }
 
 /** A receiver that never drains, counting what was queued. */
@@ -124,7 +124,7 @@ describe("queue ledger", () => {
 describe("device queue limits", () => {
   it("fits a full-size frame in one client's share and every share in the device queue", () => {
     const largest = serializeServerMessage(
-      frameMessage(new Uint8Array(LIMITS.maxFrameBytes), "0".repeat(32)),
+      signalMessage("ice", new Uint8Array(LIMITS.maxSignalBytes), "0".repeat(32)),
     );
     expect(largest.length).toBeLessThanOrEqual(LIMITS.maxClientShareBytes);
     expect(LIMITS.maxDeviceBufferedBytes).toBe(
@@ -145,7 +145,8 @@ describe("slow receiver", () => {
     // Fill the slow client's real outgoing queue past the bound, then have
     // the device send it a frame before the runtime gets a chance to drain.
     const frame = JSON.stringify({
-      type: "frame",
+      type: "signal",
+      kind: "ice",
       data: encodeBase64(new Uint8Array([1, 2, 3])),
       connection_id: slow.connectionId,
     });
@@ -175,8 +176,8 @@ describe("slow receiver", () => {
     expect(error).toMatchObject({ code: "peer_unavailable", connectionId: slow.connectionId });
 
     // Other clients keep working.
-    daemon.sendFrame(new Uint8Array([9]), other.connectionId);
-    expect((await expectMessage(other, "frame")).data).toBe(encodeBase64(new Uint8Array([9])));
+    daemon.sendSignal(new Uint8Array([9]), other.connectionId);
+    expect((await expectMessage(other, "signal")).data).toBe(encodeBase64(new Uint8Array([9])));
 
     daemon.close();
     other.close();
@@ -217,7 +218,7 @@ describe("slow device", () => {
 
     // Every frame arrives within one run of the object, so the device reads
     // none of them in between: it is slower than the flood.
-    const frame = clientFrame(LIMITS.maxFrameBytes);
+    const frame = clientFrame(LIMITS.maxSignalBytes);
     await runInDurableObject(roomFor(device), async (instance: DeviceRoom, state) => {
       const flooderSide = socketWhere(state, (a) => a["connectionId"] === flooder.connectionId);
       const otherSide = socketWhere(state, (a) => a["connectionId"] === other.connectionId);
@@ -233,20 +234,20 @@ describe("slow device", () => {
 
     // The device got the frame that fit, learned the flooder left, and got
     // the other client's frame.
-    expect((await expectMessage(daemon, "frame")).connectionId).toBe(flooder.connectionId);
+    expect((await expectMessage(daemon, "signal")).connectionId).toBe(flooder.connectionId);
     expect(await expectMessage(daemon, "peer_state")).toEqual({
       type: "peer_state",
       connectionId: flooder.connectionId,
       present: false,
     });
-    expect((await expectMessage(daemon, "frame")).connectionId).toBe(other.connectionId);
+    expect((await expectMessage(daemon, "signal")).connectionId).toBe(other.connectionId);
     expect(daemon.closed).toBeNull();
 
     // The device stays registered and the other client keeps working.
-    other.sendFrame(new Uint8Array([1]));
-    expect((await expectMessage(daemon, "frame")).connectionId).toBe(other.connectionId);
-    daemon.sendFrame(new Uint8Array([2]), other.connectionId);
-    expect((await expectMessage(other, "frame")).data).toBe(encodeBase64(new Uint8Array([2])));
+    other.sendSignal(new Uint8Array([1]));
+    expect((await expectMessage(daemon, "signal")).connectionId).toBe(other.connectionId);
+    daemon.sendSignal(new Uint8Array([2]), other.connectionId);
+    expect((await expectMessage(other, "signal")).data).toBe(encodeBase64(new Uint8Array([2])));
     expect(other.closed).toBeNull();
 
     daemon.close();
@@ -290,7 +291,8 @@ describe("slow device", () => {
     // The device addresses a client that is not there, over and over, and
     // reads none of the replies.
     const misaddressed = JSON.stringify({
-      type: "frame",
+      type: "signal",
+      kind: "ice",
       data: encodeBase64(new Uint8Array([1])),
       connection_id: "0".repeat(32),
     });

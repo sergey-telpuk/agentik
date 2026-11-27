@@ -4,243 +4,131 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdh"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/sergey-telpuk/agentik/daemon/internal/identity"
 	"github.com/sergey-telpuk/agentik/daemon/internal/protocol"
-	"github.com/sergey-telpuk/agentik/daemon/internal/transport"
 )
 
-// miniRelay is a minimal in-process relay supporting one device and multiple
-// clients so secure.Manager + transport.Client can be tested end-to-end.
-type miniRelay struct {
-	srv     *httptest.Server
-	relayID string
-
+// memNet stands in for the DataChannel: frames the Manager sends toward a
+// connection are queued for the test phone of that connection, and the test
+// phone's frames are handed straight to Manager.HandleFrame.
+type memNet struct {
 	mu      sync.Mutex
-	device  *websocket.Conn
-	clients map[string]*websocket.Conn
-	seq     int
-	seen    [][]byte // raw frame payloads observed by relay
+	inbox   map[string]chan []byte
+	onWire  [][]byte // every ciphertext the Manager sent
+	connSeq int
 }
 
-func newMiniRelay(t *testing.T) *miniRelay {
+func newMemNet() *memNet { return &memNet{inbox: make(map[string]chan []byte)} }
+
+func (n *memNet) SendFrame(_ context.Context, connID string, data []byte) error {
+	n.mu.Lock()
+	ch := n.inbox[connID]
+	n.onWire = append(n.onWire, bytes.Clone(data))
+	n.mu.Unlock()
+	if ch == nil {
+		return errors.New("no such connection")
+	}
+	ch <- bytes.Clone(data)
+	return nil
+}
+
+func (n *memNet) newConn() (string, chan []byte) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.connSeq++
+	id := fmt.Sprintf("conn-%d", n.connSeq)
+	ch := make(chan []byte, 16)
+	n.inbox[id] = ch
+	return id, ch
+}
+
+type daemonStack struct {
+	mgr     *Manager
+	net     *memNet
+	devID   *identity.Identity
+	readyCh chan *ManagedSession
+	msgCh   chan []byte
+	errCh   chan error
+	// prologue is what the daemon side will use for every connection.
+	prologue []byte
+}
+
+func startDaemonStack(t *testing.T, trustedKey []byte, prologue []byte) *daemonStack {
 	t.Helper()
-	r := &miniRelay{
-		relayID: "agentik-relay-test",
-		clients: make(map[string]*websocket.Conn),
-	}
-	r.srv = httptest.NewServer(http.HandlerFunc(r.serve))
-	t.Cleanup(func() {
-		r.mu.Lock()
-		if r.device != nil {
-			_ = r.device.Close(websocket.StatusNormalClosure, "bye")
-		}
-		for _, c := range r.clients {
-			_ = c.Close(websocket.StatusNormalClosure, "bye")
-		}
-		r.mu.Unlock()
-		r.srv.Close()
-	})
-	return r
-}
-
-func (r *miniRelay) wsURL() string {
-	return "ws" + strings.TrimPrefix(r.srv.URL, "http")
-}
-
-func (r *miniRelay) serve(w http.ResponseWriter, req *http.Request) {
-	ws, err := websocket.Accept(w, req, nil)
+	devID, err := identity.Generate()
 	if err != nil {
-		return
+		t.Fatal(err)
 	}
-	ws.SetReadLimit(64 * 1024)
-	ctx := req.Context()
-
-	chal := make([]byte, protocol.ChallengeSize)
-	_, _ = rand.Read(chal)
-	_ = writeJSON(ctx, ws, map[string]any{
-		"type":      "challenge",
-		"challenge": base64.StdEncoding.EncodeToString(chal),
-		"relayId":   r.relayID,
-		"expiresAt": time.Now().Add(time.Minute).Unix(),
+	s := &daemonStack{
+		net:      newMemNet(),
+		devID:    devID,
+		readyCh:  make(chan *ManagedSession, 4),
+		msgCh:    make(chan []byte, 8),
+		errCh:    make(chan error, 8),
+		prologue: prologue,
+	}
+	if s.prologue == nil {
+		s.prologue = DevicePrologue(devID.DeviceID())
+	}
+	s.mgr, err = NewManager(ManagerConfig{
+		DeviceID:  devID.DeviceID(),
+		StaticKey: devID.NoisePrivateKey(),
+		Sender:    s.net,
+		Prologue:  func(string) ([]byte, error) { return s.prologue, nil },
+		VerifyPeer: func(_ context.Context, _ string, clientStatic []byte) error {
+			if !protocol.ConstantTimeEqual(clientStatic, trustedKey) {
+				return errors.New("client static key not pinned")
+			}
+			return nil
+		},
+		OnSessionReady: func(_ context.Context, sess *ManagedSession) { s.readyCh <- sess },
+		OnMessage:      func(_ context.Context, _ *ManagedSession, pt []byte) { s.msgCh <- bytes.Clone(pt) },
+		OnError:        func(_ string, err error) { s.errCh <- err },
 	})
-
-	role := ""
-	connID := ""
-	defer func() {
-		if role == "client" && connID != "" {
-			r.mu.Lock()
-			delete(r.clients, connID)
-			dev := r.device
-			r.mu.Unlock()
-			if dev != nil {
-				_ = writeJSON(context.Background(), dev, map[string]any{
-					"type":         "peer_state",
-					"connectionId": connID,
-					"present":      false,
-				})
-			}
-		}
-	}()
-
-	for {
-		mt, raw, err := ws.Read(ctx)
-		if err != nil || mt != websocket.MessageText {
-			return
-		}
-		if string(raw) == transport.KeepalivePing {
-			_ = writeJSON(ctx, ws, map[string]any{"type": "pong"})
-			continue
-		}
-		var env map[string]any
-		if err := json.Unmarshal(raw, &env); err != nil {
-			return
-		}
-		switch env["type"] {
-		case "register":
-			role = "device"
-			r.mu.Lock()
-			r.device = ws
-			waiting := make([]string, 0, len(r.clients))
-			for id := range r.clients {
-				waiting = append(waiting, id)
-			}
-			r.mu.Unlock()
-			_ = writeJSON(ctx, ws, map[string]any{
-				"type":        "registered",
-				"deviceId":    req.URL.Query().Get("device"),
-				"connections": waiting,
-			})
-		case "attach":
-			role = "client"
-			r.mu.Lock()
-			r.seq++
-			connID = strings.Repeat("0", 30) + string(rune('a'+r.seq/16)) + string(rune('a'+r.seq%16))
-			r.clients[connID] = ws
-			dev := r.device
-			r.mu.Unlock()
-			_ = writeJSON(ctx, ws, map[string]any{
-				"type":          "attached",
-				"deviceId":      req.URL.Query().Get("device"),
-				"connectionId":  connID,
-				"devicePresent": dev != nil,
-			})
-			if dev != nil {
-				_ = writeJSON(ctx, dev, map[string]any{
-					"type":         "peer_state",
-					"connectionId": connID,
-					"present":      true,
-				})
-			}
-		case "frame":
-			dataStr, _ := env["data"].(string)
-			rawBytes, _ := base64.StdEncoding.DecodeString(dataStr)
-			r.mu.Lock()
-			r.seen = append(r.seen, rawBytes)
-			r.mu.Unlock()
-
-			if role == "client" {
-				r.mu.Lock()
-				dev := r.device
-				r.mu.Unlock()
-				if dev != nil {
-					_ = writeJSON(ctx, dev, map[string]any{
-						"type":         "frame",
-						"connectionId": connID,
-						"data":         dataStr,
-					})
-				}
-			} else if role == "device" {
-				targetID, _ := env["connection_id"].(string)
-				r.mu.Lock()
-				target := r.clients[targetID]
-				r.mu.Unlock()
-				if target != nil {
-					_ = writeJSON(ctx, target, map[string]any{
-						"type": "frame",
-						"data": dataStr,
-					})
-				}
-			}
-		}
-	}
-}
-
-func writeJSON(ctx context.Context, ws *websocket.Conn, v any) error {
-	b, err := json.Marshal(v)
 	if err != nil {
-		return err
+		t.Fatalf("NewManager: %v", err)
 	}
-	return ws.Write(ctx, websocket.MessageText, b)
+	t.Cleanup(s.mgr.HandleDisconnected)
+	return s
 }
 
 type testPhone struct {
-	ws      *websocket.Conn
+	stack   *daemonStack
 	connID  string
+	inbox   chan []byte
 	session *Session
 }
 
+// connectTestPhone runs the initiator side of the handshake against the
+// Manager. It returns the error the phone saw, which is ErrPeerRejected when
+// the phone's pin check fails, and a Noise error when the daemon rejected the
+// handshake (the daemon's reply never arrives, so the phone times out).
 func connectTestPhone(
 	t *testing.T,
-	ctx context.Context,
-	relayURL string,
-	devID *identity.Identity,
-	phonePriv *ecdh.PrivateKey,
+	s *daemonStack,
+	phoneKey *ecdh.PrivateKey,
 	pinnedDevicePub []byte,
+	prologue []byte,
 ) (*testPhone, error) {
 	t.Helper()
-	u := strings.TrimRight(relayURL, "/") + "/v1/connect?device=" + devID.DeviceIDString()
-	ws, _, err := websocket.Dial(ctx, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	ws.SetReadLimit(64 * 1024)
-
-	// Read challenge.
-	_, _, err = ws.Read(ctx)
-	if err != nil {
-		_ = ws.CloseNow()
-		return nil, err
-	}
-	if err := writeJSON(ctx, ws, map[string]any{
-		"type":      "attach",
-		"version":   protocol.Version,
-		"device_id": base64.StdEncoding.EncodeToString(devID.DeviceID()),
-	}); err != nil {
-		_ = ws.CloseNow()
-		return nil, err
-	}
-
-	var connID string
-	for {
-		_, raw, err := ws.Read(ctx)
-		if err != nil {
-			_ = ws.CloseNow()
-			return nil, err
-		}
-		var msg map[string]any
-		_ = json.Unmarshal(raw, &msg)
-		if msg["type"] == "attached" {
-			connID, _ = msg["connectionId"].(string)
-			break
-		}
+	ctx := context.Background()
+	connID, inbox := s.net.newConn()
+	s.mgr.HandlePeerState(ctx, connID, true)
+	if prologue == nil {
+		prologue = s.prologue
 	}
 
 	hs, err := NewHandshake(Config{
 		Initiator: true,
-		StaticKey: phonePriv,
-		Prologue:  DevicePrologue(devID.DeviceID()),
+		StaticKey: phoneKey,
+		Prologue:  prologue,
 		VerifyPeer: func(peerStatic []byte) error {
 			if !protocol.ConstantTimeEqual(peerStatic, pinnedDevicePub) {
 				return errors.New("device pin mismatch")
@@ -249,430 +137,322 @@ func connectTestPhone(
 		},
 	})
 	if err != nil {
-		_ = ws.CloseNow()
 		return nil, err
 	}
-
-	// Send XX msg1 -> e
 	msg1, err := hs.WriteMessage(nil)
 	if err != nil {
-		_ = ws.CloseNow()
 		return nil, err
 	}
-	if err := writeJSON(ctx, ws, map[string]any{
-		"type": "frame",
-		"data": base64.StdEncoding.EncodeToString(msg1),
-	}); err != nil {
-		_ = ws.CloseNow()
-		return nil, err
-	}
+	s.mgr.HandleFrame(ctx, connID, msg1)
 
-	// Wait for XX msg2 <- e, ee, s, es
 	var msg2 []byte
-	for {
-		_, raw, err := ws.Read(ctx)
-		if err != nil {
-			_ = ws.CloseNow()
-			return nil, err
-		}
-		var env map[string]any
-		_ = json.Unmarshal(raw, &env)
-		if env["type"] == "frame" {
-			s, _ := env["data"].(string)
-			msg2, _ = base64.StdEncoding.DecodeString(s)
-			break
-		}
+	select {
+	case msg2 = <-inbox:
+	case <-time.After(300 * time.Millisecond):
+		return nil, errors.New("no handshake reply from the daemon")
 	}
 	if _, err := hs.ReadMessage(msg2); err != nil {
-		_ = ws.CloseNow()
 		return nil, err
 	}
-
-	// Send XX msg3 -> s, se
 	msg3, err := hs.WriteMessage(nil)
 	if err != nil {
-		_ = ws.CloseNow()
 		return nil, err
 	}
-	if err := writeJSON(ctx, ws, map[string]any{
-		"type": "frame",
-		"data": base64.StdEncoding.EncodeToString(msg3),
-	}); err != nil {
-		_ = ws.CloseNow()
-		return nil, err
-	}
-
+	s.mgr.HandleFrame(ctx, connID, msg3)
 	sess, err := hs.Session()
 	if err != nil {
-		_ = ws.CloseNow()
 		return nil, err
 	}
-	return &testPhone{ws: ws, connID: connID, session: sess}, nil
+	return &testPhone{stack: s, connID: connID, inbox: inbox, session: sess}, nil
 }
 
-func (p *testPhone) sendEncrypted(ctx context.Context, plaintext []byte) ([]byte, error) {
+func (p *testPhone) sendEncrypted(plaintext []byte) ([]byte, error) {
 	ct, err := p.session.Encrypt(plaintext)
 	if err != nil {
 		return nil, err
 	}
-	if err := writeJSON(ctx, p.ws, map[string]any{
-		"type": "frame",
-		"data": base64.StdEncoding.EncodeToString(ct),
-	}); err != nil {
-		return nil, err
-	}
+	p.stack.mgr.HandleFrame(context.Background(), p.connID, ct)
 	return ct, nil
 }
 
-func (p *testPhone) recvDecrypted(ctx context.Context) ([]byte, error) {
-	for {
-		_, raw, err := p.ws.Read(ctx)
-		if err != nil {
-			return nil, err
-		}
-		var env map[string]any
-		_ = json.Unmarshal(raw, &env)
-		if env["type"] != "frame" {
-			continue
-		}
-		s, _ := env["data"].(string)
-		ct, _ := base64.StdEncoding.DecodeString(s)
-		return p.session.Decrypt(ct)
-	}
-}
-
-func startDaemonStack(
-	t *testing.T,
-	ctx context.Context,
-	relayURL string,
-	devID *identity.Identity,
-	trustedKey []byte,
-) (*Manager, *transport.Client, chan *ManagedSession, chan []byte, chan error) {
-	t.Helper()
-	readyCh := make(chan *ManagedSession, 4)
-	msgCh := make(chan []byte, 8)
-	errCh := make(chan error, 8)
-	regDone := make(chan struct{}, 1)
-
-	var client *transport.Client
-	var mgr *Manager
-	var err error
-
-	// Wrap transport.Client as FrameSender once constructed.
-	sender := senderFunc(func(sctx context.Context, connID string, data []byte) error {
-		return client.SendFrame(sctx, connID, data)
-	})
-
-	mgr, err = NewManager(ManagerConfig{
-		DeviceID:  devID.DeviceID(),
-		StaticKey: devID.NoisePrivateKey(),
-		Sender:    sender,
-		VerifyPeer: func(_ context.Context, _ string, clientStatic []byte) error {
-			if !protocol.ConstantTimeEqual(clientStatic, trustedKey) {
-				return errors.New("client static key not pinned")
-			}
-			return nil
-		},
-		OnSessionReady: func(_ context.Context, s *ManagedSession) {
-			readyCh <- s
-		},
-		OnMessage: func(_ context.Context, _ *ManagedSession, pt []byte) {
-			msgCh <- bytes.Clone(pt)
-		},
-		OnError: func(_ string, err error) {
-			errCh <- err
-		},
-	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-
-	client, err = transport.NewClient(transport.Config{
-		RelayURL:     relayURL,
-		Identity:     devID,
-		PingInterval: time.Minute,
-		Handlers: transport.Handlers{
-			OnRegistered: func(_ string, conns []string) {
-				mgr.HandleRegistered(ctx, conns)
-				select {
-				case regDone <- struct{}{}:
-				default:
-				}
-			},
-			OnDisconnected: func() {
-				mgr.HandleDisconnected()
-			},
-			OnPeerState: func(connID string, present bool) {
-				mgr.HandlePeerState(ctx, connID, present)
-			},
-			OnFrame: func(connID string, data []byte) {
-				mgr.HandleFrame(ctx, connID, data)
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-
-	go func() { _ = client.Run(ctx) }()
-
+func (p *testPhone) recvDecrypted() ([]byte, error) {
 	select {
-	case <-regDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("daemon failed to register with miniRelay")
+	case ct := <-p.inbox:
+		return p.session.Decrypt(ct)
+	case <-time.After(time.Second):
+		return nil, errors.New("timed out")
 	}
-	return mgr, client, readyCh, msgCh, errCh
 }
 
-type senderFunc func(context.Context, string, []byte) error
+func fingerprint(b byte) []byte { return bytes.Repeat([]byte{b}, protocol.DTLSFingerprintSize) }
 
-func (f senderFunc) SendFrame(ctx context.Context, connID string, data []byte) error {
-	return f(ctx, connID, data)
-}
-
-func TestNoiseOverTransport_HandshakeSuccessAndRelayOpacity(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	relay := newMiniRelay(t)
-	devID, _ := identity.Generate()
+func TestNoiseOverDataChannel_HandshakeSuccessAndCiphertextOpacity(t *testing.T) {
 	phoneKey := newStatic(t)
+	s := startDaemonStack(t, phoneKey.PublicKey().Bytes(), nil)
 
-	_, _, readyCh, msgCh, errCh := startDaemonStack(t, ctx, relay.wsURL(), devID, phoneKey.PublicKey().Bytes())
-
-	phone, err := connectTestPhone(t, ctx, relay.wsURL(), devID, phoneKey, devID.NoisePublicKey())
+	phone, err := connectTestPhone(t, s, phoneKey, s.devID.NoisePublicKey(), nil)
 	if err != nil {
 		t.Fatalf("connectTestPhone: %v", err)
 	}
-	defer phone.ws.CloseNow()
-
 	var daemonSess *ManagedSession
 	select {
-	case daemonSess = <-readyCh:
-	case err := <-errCh:
+	case daemonSess = <-s.readyCh:
+	case err := <-s.errCh:
 		t.Fatalf("unexpected daemon noise error: %v", err)
-	case <-ctx.Done():
+	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for daemon session")
 	}
 
 	secretPrompt := []byte(`{"v":1,"request_id":"r1","method":"task.start","params":{"prompt":"super secret prompt"}}`)
-	if _, err := phone.sendEncrypted(ctx, secretPrompt); err != nil {
-		t.Fatalf("phone sendEncrypted: %v", err)
+	if _, err := phone.sendEncrypted(secretPrompt); err != nil {
+		t.Fatal(err)
 	}
-
 	select {
-	case got := <-msgCh:
+	case got := <-s.msgCh:
 		if !bytes.Equal(got, secretPrompt) {
 			t.Fatalf("daemon decrypted = %q, want %q", got, secretPrompt)
 		}
-	case <-ctx.Done():
+	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for decrypted message")
 	}
 
 	reply := []byte(`{"v":1,"request_id":"r1","ok":true}`)
-	if err := daemonSess.Send(ctx, reply); err != nil {
-		t.Fatalf("daemon Send: %v", err)
+	if err := daemonSess.Send(context.Background(), reply); err != nil {
+		t.Fatal(err)
 	}
-	gotReply, err := phone.recvDecrypted(ctx)
-	if err != nil {
-		t.Fatalf("phone recvDecrypted: %v", err)
-	}
-	if !bytes.Equal(gotReply, reply) {
-		t.Fatalf("phone decrypted = %q, want %q", gotReply, reply)
+	gotReply, err := phone.recvDecrypted()
+	if err != nil || !bytes.Equal(gotReply, reply) {
+		t.Fatalf("phone decrypted = %q, %v", gotReply, err)
 	}
 
-	// Ensure relay never saw plaintext prompt or reply.
-	relay.mu.Lock()
-	for _, raw := range relay.seen {
+	s.net.mu.Lock()
+	defer s.net.mu.Unlock()
+	for _, raw := range s.net.onWire {
 		if bytes.Contains(raw, []byte("super secret prompt")) || bytes.Contains(raw, []byte(`"ok":true`)) {
-			t.Fatal("relay saw plaintext frame payload")
+			t.Fatal("the wire carried a plaintext payload")
 		}
 	}
-	relay.mu.Unlock()
 }
 
-func TestNoiseOverTransport_WrongPinRejected(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	relay := newMiniRelay(t)
-	devID, _ := identity.Generate()
+func TestNoiseOverDataChannel_WrongPinRejected(t *testing.T) {
 	trustedPhone := newStatic(t)
 	attackerPhone := newStatic(t)
+	s := startDaemonStack(t, trustedPhone.PublicKey().Bytes(), nil)
 
-	_, _, readyCh, msgCh, errCh := startDaemonStack(t, ctx, relay.wsURL(), devID, trustedPhone.PublicKey().Bytes())
-
-	// 1. Unknown/unpinned phone connects: responder rejects at msg3.
-	attacker, err := connectTestPhone(t, ctx, relay.wsURL(), devID, attackerPhone, devID.NoisePublicKey())
+	// 1. Unknown/unpinned phone: the responder rejects at message 3.
+	attacker, err := connectTestPhone(t, s, attackerPhone, s.devID.NoisePublicKey(), nil)
 	if err == nil {
-		// Initiator completes msg3 write, then responder rejects msg3.
-		_, _ = attacker.sendEncrypted(ctx, []byte("unauthorized command"))
-		_ = attacker.ws.CloseNow()
+		_, _ = attacker.sendEncrypted([]byte("unauthorized command"))
 	}
-
 	select {
-	case err := <-errCh:
+	case err := <-s.errCh:
 		if !errors.Is(err, ErrPeerRejected) {
 			t.Fatalf("expected ErrPeerRejected, got %v", err)
 		}
-	case <-ctx.Done():
+	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for ErrPeerRejected")
 	}
-
 	select {
-	case <-readyCh:
+	case <-s.readyCh:
 		t.Fatal("untrusted client created a session")
-	case <-msgCh:
+	case <-s.msgCh:
 		t.Fatal("untrusted client delivered a message")
 	case <-time.After(80 * time.Millisecond):
 	}
 
-	// 2. Trusted phone with wrong pinned device key aborts at msg2.
+	// 2. Trusted phone with the wrong pinned device key aborts at message 2.
 	wrongDeviceKey := newStatic(t).PublicKey().Bytes()
-	if _, err := connectTestPhone(t, ctx, relay.wsURL(), devID, trustedPhone, wrongDeviceKey); !errors.Is(err, ErrPeerRejected) {
+	if _, err := connectTestPhone(t, s, trustedPhone, wrongDeviceKey, nil); !errors.Is(err, ErrPeerRejected) {
 		t.Fatalf("wrong device pin: got %v, want ErrPeerRejected", err)
 	}
 }
 
-func TestNoiseOverTransport_ReplayRejected(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	relay := newMiniRelay(t)
-	devID, _ := identity.Generate()
+func TestNoiseOverDataChannel_ReplayRejected(t *testing.T) {
 	phoneKey := newStatic(t)
-
-	_, _, readyCh, msgCh, errCh := startDaemonStack(t, ctx, relay.wsURL(), devID, phoneKey.PublicKey().Bytes())
-
-	phone, err := connectTestPhone(t, ctx, relay.wsURL(), devID, phoneKey, devID.NoisePublicKey())
+	s := startDaemonStack(t, phoneKey.PublicKey().Bytes(), nil)
+	phone, err := connectTestPhone(t, s, phoneKey, s.devID.NoisePublicKey(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer phone.ws.CloseNow()
-	<-readyCh
+	<-s.readyCh
 
-	firstMsg := []byte("first-and-only")
-	capturedCT, err := phone.sendEncrypted(ctx, firstMsg)
+	first := []byte("first-and-only")
+	captured, err := phone.sendEncrypted(first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := <-msgCh; !bytes.Equal(got, firstMsg) {
-		t.Fatalf("got %q, want %q", got, firstMsg)
+	if got := <-s.msgCh; !bytes.Equal(got, first) {
+		t.Fatalf("got %q, want %q", got, first)
 	}
 
-	// Replay exact ciphertext over the same connection.
-	if err := writeJSON(ctx, phone.ws, map[string]any{
-		"type": "frame",
-		"data": base64.StdEncoding.EncodeToString(capturedCT),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
+	s.mgr.HandleFrame(context.Background(), phone.connID, captured)
 	select {
-	case err := <-errCh:
+	case err := <-s.errCh:
 		if !strings.Contains(err.Error(), "decrypt") {
 			t.Fatalf("unexpected error on replay: %v", err)
 		}
-	case got := <-msgCh:
+	case got := <-s.msgCh:
 		t.Fatalf("replayed ciphertext was decrypted: %q", got)
-	case <-ctx.Done():
+	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for replay rejection")
 	}
 }
 
-func TestNoiseOverTransport_CrossSessionIncompatibility(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	relay := newMiniRelay(t)
-	devID, _ := identity.Generate()
+func TestNoiseOverDataChannel_CrossSessionIncompatibility(t *testing.T) {
 	phoneKey := newStatic(t)
+	s := startDaemonStack(t, phoneKey.PublicKey().Bytes(), nil)
 
-	_, _, readyCh, msgCh, errCh := startDaemonStack(t, ctx, relay.wsURL(), devID, phoneKey.PublicKey().Bytes())
-
-	// Session 1: encrypt a ciphertext.
-	phone1, err := connectTestPhone(t, ctx, relay.wsURL(), devID, phoneKey, devID.NoisePublicKey())
+	phone1, err := connectTestPhone(t, s, phoneKey, s.devID.NoisePublicKey(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	<-readyCh
+	<-s.readyCh
 	oldCT, err := phone1.session.Encrypt([]byte("old-session-command"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = phone1.ws.Close(websocket.StatusNormalClosure, "reconnect")
+	s.mgr.CloseConnection(phone1.connID)
 
-	// Session 2: fresh handshake with the exact same keys.
-	phone2, err := connectTestPhone(t, ctx, relay.wsURL(), devID, phoneKey, devID.NoisePublicKey())
+	phone2, err := connectTestPhone(t, s, phoneKey, s.devID.NoisePublicKey(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer phone2.ws.CloseNow()
-	<-readyCh
+	<-s.readyCh
 
-	// Inject ciphertext from Session 1 into Session 2 -> must fail.
-	if err := writeJSON(ctx, phone2.ws, map[string]any{
-		"type": "frame",
-		"data": base64.StdEncoding.EncodeToString(oldCT),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
+	s.mgr.HandleFrame(context.Background(), phone2.connID, oldCT)
 	select {
-	case err := <-errCh:
+	case err := <-s.errCh:
 		if !strings.Contains(err.Error(), "decrypt") {
 			t.Fatalf("expected decrypt error on cross-session frame, got %v", err)
 		}
-	case got := <-msgCh:
+	case got := <-s.msgCh:
 		t.Fatalf("cross-session ciphertext accepted: %q", got)
-	case <-ctx.Done():
+	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for cross-session rejection")
 	}
 }
 
-func TestNoiseOverTransport_PerConnectionIsolation(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	relay := newMiniRelay(t)
-	devID, _ := identity.Generate()
+func TestNoiseOverDataChannel_PerConnectionIsolation(t *testing.T) {
 	phoneKey := newStatic(t)
+	s := startDaemonStack(t, phoneKey.PublicKey().Bytes(), nil)
 
-	_, _, readyCh, msgCh, errCh := startDaemonStack(t, ctx, relay.wsURL(), devID, phoneKey.PublicKey().Bytes())
-
-	phoneA, err := connectTestPhone(t, ctx, relay.wsURL(), devID, phoneKey, devID.NoisePublicKey())
+	phoneA, err := connectTestPhone(t, s, phoneKey, s.devID.NoisePublicKey(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer phoneA.ws.CloseNow()
-	<-readyCh
-
-	phoneB, err := connectTestPhone(t, ctx, relay.wsURL(), devID, phoneKey, devID.NoisePublicKey())
+	<-s.readyCh
+	phoneB, err := connectTestPhone(t, s, phoneKey, s.devID.NoisePublicKey(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer phoneB.ws.CloseNow()
-	<-readyCh
+	<-s.readyCh
 
 	ctFromA, err := phoneA.session.Encrypt([]byte("for-connection-A-only"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeJSON(ctx, phoneB.ws, map[string]any{
-		"type": "frame",
-		"data": base64.StdEncoding.EncodeToString(ctFromA),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
+	s.mgr.HandleFrame(context.Background(), phoneB.connID, ctFromA)
 	select {
-	case err := <-errCh:
+	case err := <-s.errCh:
 		if !strings.Contains(err.Error(), "decrypt") {
 			t.Fatalf("expected decrypt error across connections, got %v", err)
 		}
-	case got := <-msgCh:
+	case got := <-s.msgCh:
 		t.Fatalf("frame encrypted on conn A decrypted on conn B: %q", got)
-	case <-ctx.Done():
+	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for cross-connection rejection")
+	}
+}
+
+func TestNoiseOverDataChannel_FingerprintBinding(t *testing.T) {
+	phoneKey := newStatic(t)
+	dev, _ := identity.Generate()
+	deviceID := dev.DeviceID()
+
+	daemonView, err := WebRTCPrologue(deviceID, fingerprint(0xA1), fingerprint(0xB2))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("matching fingerprints complete", func(t *testing.T) {
+		s := startDaemonStack(t, phoneKey.PublicKey().Bytes(), daemonView)
+		if _, err := connectTestPhone(t, s, phoneKey, s.devID.NoisePublicKey(), daemonView); err != nil {
+			t.Fatalf("handshake with equal prologues: %v", err)
+		}
+	})
+
+	cases := map[string][2][]byte{
+		"phone fingerprint swapped":  {fingerprint(0xEE), fingerprint(0xB2)},
+		"daemon fingerprint swapped": {fingerprint(0xA1), fingerprint(0xEE)},
+		"both swapped":               {fingerprint(0xEE), fingerprint(0xEF)},
+		"roles reversed":             {fingerprint(0xB2), fingerprint(0xA1)},
+	}
+	for name, fps := range cases {
+		t.Run(name, func(t *testing.T) {
+			phoneView, err := WebRTCPrologue(deviceID, fps[0], fps[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := startDaemonStack(t, phoneKey.PublicKey().Bytes(), daemonView)
+			if _, err := connectTestPhone(t, s, phoneKey, s.devID.NoisePublicKey(), phoneView); err == nil {
+				t.Fatal("handshake completed although the peers saw different fingerprints")
+			}
+			select {
+			case <-s.readyCh:
+				t.Fatal("the daemon created a session")
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestWebRTCPrologueValidation(t *testing.T) {
+	id := bytes.Repeat([]byte{7}, protocol.DeviceIDSize)
+	if _, err := WebRTCPrologue(id, fingerprint(1)[:31], fingerprint(2)); err == nil {
+		t.Fatal("a short fingerprint was accepted")
+	}
+	if _, err := WebRTCPrologue(id, fingerprint(1), append(fingerprint(2), 0)); err == nil {
+		t.Fatal("a long fingerprint was accepted")
+	}
+	a, _ := WebRTCPrologue(id, fingerprint(1), fingerprint(2))
+	b, _ := WebRTCPrologue(id, fingerprint(2), fingerprint(1))
+	if bytes.Equal(a, b) {
+		t.Fatal("swapping the two fingerprints must change the prologue")
+	}
+	if bytes.Equal(a, DevicePrologue(id)) {
+		t.Fatal("the bound prologue must differ from the base prologue")
+	}
+}
+
+func TestManagerRequiresPrologueAndAbortsWithoutOne(t *testing.T) {
+	dev, _ := identity.Generate()
+	base := ManagerConfig{
+		DeviceID:   dev.DeviceID(),
+		StaticKey:  dev.NoisePrivateKey(),
+		Sender:     newMemNet(),
+		VerifyPeer: func(context.Context, string, []byte) error { return nil },
+	}
+	if _, err := NewManager(base); err == nil {
+		t.Fatal("a Manager without a Prologue was accepted")
+	}
+
+	errCh := make(chan error, 1)
+	base.Prologue = func(string) ([]byte, error) { return nil, errors.New("no fingerprints for this connection") }
+	base.OnError = func(_ string, err error) { errCh <- err }
+	mgr, err := NewManager(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.HandlePeerState(context.Background(), "c1", true)
+	select {
+	case err := <-errCh:
+		if !strings.Contains(err.Error(), "no fingerprints") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no error reported")
+	}
+	if _, ok := mgr.Session("c1"); ok {
+		t.Fatal("a session exists for a connection with no prologue")
 	}
 }
