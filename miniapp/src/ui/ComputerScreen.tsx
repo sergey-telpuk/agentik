@@ -11,6 +11,8 @@ interface Props {
   readonly onForget: () => void;
   readonly onSettings: () => void;
   readonly onOpenProject: (project: Project) => void;
+  /** Where folders are added and removed; the daemon takes no flags. */
+  readonly onFolders: () => void;
   readonly onBack: () => void;
 }
 
@@ -46,7 +48,7 @@ function ConnectionProgress({ connection, skipConfirm }: { connection: Connectio
   );
 }
 
-export function ComputerScreen({ api, computer, connection, onRetry, onForget, onSettings, onOpenProject, onBack }: Props) {
+export function ComputerScreen({ api, computer, connection, onRetry, onForget, onSettings, onOpenProject, onFolders, onBack }: Props) {
   const [loaded, setLoaded] = useState<Loaded>({ kind: "loading" });
   const [confirmingForget, setConfirmingForget] = useState(false);
   const ready = connection?.phase === "ready";
@@ -118,15 +120,15 @@ export function ComputerScreen({ api, computer, connection, onRetry, onForget, o
             </Notice>
           )}
           {loaded.kind === "ready" && loaded.projects.length === 0 && (
-            <Empty title="No projects are shared with this phone.">
-              <p>
-                The computer decides which folders an agent may use, so projects are listed when the daemon starts.
-                Restart it with one <code>-project</code> for each folder:
-              </p>
-              <p className="empty-code">
-                <code>agentik -project my-app=/Users/you/Projects/my-app</code>
-              </p>
-              <p>Pairing survives the restart, so you do not scan the code again.</p>
+            <Empty
+              title="No folders yet."
+              action={
+                <button type="button" className="button button-primary" onClick={onFolders}>
+                  Add a folder
+                </button>
+              }
+            >
+              <p>Add the folders an agent may work in. Nothing has to be configured on the computer.</p>
             </Empty>
           )}
           {loaded.kind === "ready" && loaded.projects.length > 0 && (

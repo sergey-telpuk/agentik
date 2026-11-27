@@ -146,6 +146,12 @@ export interface SessionListResult {
   readonly sessions_truncated?: boolean;
 }
 
+export interface ProjectAddResult {
+  readonly project_id: string;
+  readonly name: string;
+  readonly agents: readonly string[];
+}
+
 export interface SessionDeleteResult {
   readonly session_id: string;
   readonly deleted: boolean;

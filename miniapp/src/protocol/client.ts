@@ -17,6 +17,7 @@ import {
   type ServerEvent,
   type SessionListResult,
   type SessionOpenParams,
+  type ProjectAddResult,
   type SessionDeleteResult,
   type SessionOpenResult,
   type TaskResult,
@@ -158,6 +159,19 @@ export class AgentikRpcClient {
 
   listSessions(projectId?: string, options: { readonly timeoutMs?: number } = {}): Promise<SessionListResult> {
     return this.request("session.list", projectId === undefined ? {} : { project_id: projectId }, options);
+  }
+
+  /** Permits a directory on the computer. The path is resolved there. */
+  addProject(path: string, name?: string, agent?: string): Promise<ProjectAddResult> {
+    const body: Record<string, unknown> = { path };
+    if (name !== undefined && name !== "") body["name"] = name;
+    if (agent !== undefined && agent !== "") body["agent"] = agent;
+    return this.request("project.add", body);
+  }
+
+  /** Withdraws permission for a directory. Conversations in it are kept. */
+  removeProject(projectId: string): Promise<{ readonly project_id: string; readonly removed: boolean }> {
+    return this.request("project.remove", { project_id: projectId });
   }
 
   /** Deletes one conversation on the computer. The removal is permanent. */

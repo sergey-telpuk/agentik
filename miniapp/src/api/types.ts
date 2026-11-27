@@ -360,6 +360,16 @@ export interface AgentikApi {
    */
   connect(computerId: string, onState: (state: ConnectionState) => void): Unsubscribe;
   listProjects(computerId: string): Promise<ApiResult<Project[]>>;
+  /**
+   * Permits a directory on the computer. The path is resolved there: a
+   * missing directory, or one that is not a directory, is refused.
+   */
+  addProject(computerId: string, path: string, name?: string): Promise<ApiResult<Project>>;
+  /**
+   * Withdraws permission. Conversations that ran in it are kept; removal is
+   * refused while an agent is still working there.
+   */
+  removeProject(computerId: string, projectId: string): Promise<ApiResult<null>>;
   listAgents(computerId: string): Promise<ApiResult<Agent[]>>;
   listTasks(computerId: string, projectId: string): Promise<ApiResult<TaskSummary[]>>;
   /**

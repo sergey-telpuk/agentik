@@ -35,6 +35,7 @@ import { isFinalState } from "../taskState";
 import {
   MAX_PROMPT_LENGTH,
   type AgentikApi,
+  type Project,
   type ApiErrorCode,
   type ApiResult,
   type Computer,
@@ -349,6 +350,22 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
         attempt.close();
         if (attempts.get(computerId) === attempt) attempts.delete(computerId);
       };
+    },
+
+    async addProject(computerId, path, name) {
+      const trimmed = path.trim();
+      if (trimmed === "") return fail("invalid", "Enter the folder to add.");
+      return call(computerId, async (rpc): Promise<Project> => {
+        const added = await rpc.addProject(trimmed, name);
+        return { id: added.project_id, name: added.name, activeTasks: 0 };
+      });
+    },
+
+    async removeProject(computerId, projectId) {
+      return call(computerId, async (rpc): Promise<null> => {
+        await rpc.removeProject(projectId);
+        return null;
+      });
     },
 
     async listProjects(computerId) {

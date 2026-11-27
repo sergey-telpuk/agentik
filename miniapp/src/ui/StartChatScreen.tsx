@@ -123,7 +123,7 @@ export function StartChatScreen({ api, newRequestId, onStarted, onComputers, onB
             </button>
           }
         >
-          <p>Pair a computer and share a folder with this phone to start a conversation.</p>
+          <p>An agent works in a folder on your computer. Pair one and add a folder to start a conversation.</p>
         </Empty>
       </Page>
     );

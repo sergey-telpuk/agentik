@@ -332,7 +332,8 @@ interface ComputerRecord {
   lastSeenAt: number | null;
   readonly relayUrl: string;
   readonly pairedAt: number;
-  readonly projects: readonly SeedProject[];
+  // Mutable: the phone can add and remove projects.
+  projects: SeedProject[];
   readonly tasks: Map<string, MockTask>;
   readonly source: "demo" | "pinned";
   connectAttempts: number;
@@ -373,7 +374,7 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
       lastSeenAt: seed.lastSeenAgoMs === null ? null : start - seed.lastSeenAgoMs,
       relayUrl: DEMO_RELAY_URL,
       pairedAt: start - seed.pairedAgoMs,
-      projects: seed.projects,
+      projects: [...seed.projects],
       tasks: new Map(),
       source: "demo",
       connectAttempts: 0,
@@ -413,7 +414,7 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
         lastSeenAt: null,
         relayUrl: device.relayUrl,
         pairedAt: device.pinnedAt * 1000,
-        projects: PAIRED_COMPUTER_PROJECTS,
+        projects: [...PAIRED_COMPUTER_PROJECTS],
         tasks: new Map(),
         source: "pinned",
         connectAttempts: 0,
@@ -634,6 +635,31 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
         closed = true;
         for (const timer of timers) clearTimeout(timer);
       };
+    },
+
+    async addProject(computerId, path, name) {
+      const record = await session(computerId);
+      if (!record.ok) return record;
+      const trimmed = path.trim();
+      if (trimmed === "") return fail("invalid", "Enter the folder to add.");
+      const id = `proj_${trimmed.replace(/[^a-z0-9]+/gi, "").slice(-12).toLowerCase()}`;
+      const label = name !== undefined && name.trim() !== "" ? name.trim() : (trimmed.split("/").pop() ?? trimmed);
+      // The id comes from the path, so adding the same folder again renames
+      // the project rather than making a second one.
+      record.value.projects = [...record.value.projects.filter((p) => p.id !== id), { id, name: label }];
+      return ok({ id, name: label, activeTasks: 0 });
+    },
+
+    async removeProject(computerId, projectId) {
+      const record = await session(computerId);
+      if (!record.ok) return record;
+      if (!record.value.projects.some((p) => p.id === projectId)) {
+        return fail("not_found", "This project is not available to this phone.");
+      }
+      const busy = [...record.value.tasks.values()].some((t) => t.projectId === projectId && !isFinalState(t.summary().state));
+      if (busy) return fail("busy", "An agent is still working in this project.");
+      record.value.projects = record.value.projects.filter((p) => p.id !== projectId);
+      return ok(null);
     },
 
     async listProjects(computerId) {

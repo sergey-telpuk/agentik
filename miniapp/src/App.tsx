@@ -6,6 +6,7 @@ import type { PinnedDeviceStore } from "./storage/pinnedDevices";
 import { AccessEndedScreen } from "./ui/AccessEndedScreen";
 import { ComputerScreen } from "./ui/ComputerScreen";
 import { ChatsScreen } from "./ui/ChatsScreen";
+import { FoldersScreen } from "./ui/FoldersScreen";
 import { StartChatScreen } from "./ui/StartChatScreen";
 import { ComputersScreen } from "./ui/ComputersScreen";
 import { NewTaskScreen } from "./ui/NewTaskScreen";
@@ -18,6 +19,7 @@ import { TerminalScreen } from "./ui/TerminalScreen";
 type Route =
   | { readonly name: "chats" }
   | { readonly name: "start_chat" }
+  | { readonly name: "folders"; readonly computer: Computer }
   | { readonly name: "computers" }
   | { readonly name: "pair" }
   | { readonly name: "settings" }
@@ -270,6 +272,15 @@ function Screen({ route, ready, services, connection, listKey, scenarios, push, 
           onBack={back}
         />
       );
+    case "folders":
+      return (
+        <FoldersScreen
+          api={api}
+          computerId={route.computer.id}
+          computerName={route.computer.name}
+          onBack={back}
+        />
+      );
     case "computers":
       return (
         <ComputersScreen
@@ -305,6 +316,7 @@ function Screen({ route, ready, services, connection, listKey, scenarios, push, 
             void api.forgetComputer(route.computer.id).then(home);
           }}
           onOpenProject={(p) => push({ name: "project", computer: route.computer, projectId: p.id, projectName: p.name })}
+          onFolders={() => push({ name: "folders", computer: route.computer })}
           onBack={home}
         />
       );
