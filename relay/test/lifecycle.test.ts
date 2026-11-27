@@ -1,0 +1,238 @@
+/**
+ * Socket lifecycle: challenge deadlines, eviction under slot pressure, and
+ * registration races.
+ *
+ * Deadlines are tens of seconds in production, so these tests move a
+ * socket's recorded deadline or activity into the past through the object's
+ * own state rather than waiting.
+ */
+
+import { describe, expect, it } from "vitest";
+import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import {
+  type TestDevice,
+  TestPeer,
+  buildRegister,
+  connectAttachedClient,
+  connectRegisteredDevice,
+  createDevice,
+  expectMessage,
+} from "./helpers";
+import { LIMITS } from "../src/device-room";
+import { encodeBase64 } from "../src/protocol";
+
+type Attachment = Record<string, unknown>;
+
+function roomFor(device: TestDevice): DurableObjectStub {
+  const namespace = (env as unknown as { DEVICE: DurableObjectNamespace }).DEVICE;
+  return namespace.get(namespace.idFromName(device.deviceIdText));
+}
+
+/** Rewrites the attachments `edit` returns a replacement for. */
+async function editSockets(
+  device: TestDevice,
+  edit: (state: Attachment) => Attachment | null,
+): Promise<number> {
+  return runInDurableObject(roomFor(device), (_instance, state) => {
+    let edited = 0;
+    for (const ws of state.getWebSockets()) {
+      const next = edit(ws.deserializeAttachment() as Attachment);
+      if (next !== null) {
+        ws.serializeAttachment(next);
+        edited += 1;
+      }
+    }
+    return edited;
+  });
+}
+
+/** Moves one pending socket's deadline into the past. */
+async function expireChallenge(device: TestDevice, challenge: Uint8Array): Promise<void> {
+  const text = encodeBase64(challenge);
+  const edited = await editSockets(device, (s) =>
+    s["challenge"] === text ? { ...s, challengeExpiresAt: Date.now() - 1 } : null,
+  );
+  expect(edited).toBe(1);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+describe("challenge deadline", () => {
+  it("closes a socket that never sends anything once its challenge expires", async () => {
+    const device = await createDevice();
+    const silent = await TestPeer.connect(device.deviceIdText);
+    const challenge = await silent.challenge();
+    const fresh = await TestPeer.connect(device.deviceIdText);
+    await fresh.challenge();
+
+    await expireChallenge(device, challenge);
+    expect(await runDurableObjectAlarm(roomFor(device))).toBe(true);
+
+    expect((await expectMessage(silent, "error")).code).toBe("expired");
+    expect((await silent.waitClosed()).code).toBe(4001);
+
+    // The socket still inside its deadline is untouched, and the alarm is
+    // rearmed for it.
+    await fresh.expectSilence();
+    expect(fresh.closed).toBeNull();
+    const alarm = await runInDurableObject(roomFor(device), (_i, state) => state.storage.getAlarm());
+    expect(alarm).not.toBeNull();
+    fresh.close();
+  });
+
+  it("rejects any message on an expired socket", async () => {
+    const device = await createDevice();
+    const peer = await TestPeer.connect(device.deviceIdText);
+    const challenge = await peer.challenge();
+
+    await expireChallenge(device, challenge);
+    peer.sendJson({ type: "attach", version: 1, device_id: encodeBase64(device.deviceId) });
+
+    expect((await expectMessage(peer, "error")).code).toBe("expired");
+    expect((await peer.waitClosed()).code).toBe(4001);
+  });
+
+  it("sweeps expired sockets when another connection arrives", async () => {
+    const device = await createDevice();
+    const stale = await TestPeer.connect(device.deviceIdText);
+    const challenge = await stale.challenge();
+
+    await expireChallenge(device, challenge);
+    const newcomer = await TestPeer.connect(device.deviceIdText);
+    await newcomer.challenge();
+
+    expect((await expectMessage(stale, "error")).code).toBe("expired");
+    expect((await stale.waitClosed()).code).toBe(4001);
+    newcomer.close();
+  });
+
+  it("does not expire an established connection", async () => {
+    const device = await createDevice();
+    const daemon = await connectRegisteredDevice(device);
+    const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    await expectMessage(daemon, "peer_state");
+
+    await editSockets(device, (s) => ({ ...s, challengeExpiresAt: Date.now() - 1 }));
+    await runDurableObjectAlarm(roomFor(device));
+
+    phone.sendFrame(new Uint8Array([1]));
+    expect((await expectMessage(daemon, "frame")).connectionId).toBe(phone.connectionId);
+    daemon.close();
+    phone.close();
+  });
+});
+
+describe("eviction under slot pressure", () => {
+  it("evicts the oldest unauthenticated socket to admit a new one", async () => {
+    const device = await createDevice();
+    const daemon = await connectRegisteredDevice(device);
+
+    const pending: TestPeer[] = [];
+    for (let i = 0; i < LIMITS.maxPending; i++) {
+      const peer = await TestPeer.connect(device.deviceIdText);
+      await peer.challenge();
+      pending.push(peer);
+      await sleep(2);
+    }
+
+    const newcomer = await TestPeer.connect(device.deviceIdText);
+    await newcomer.challenge();
+
+    const oldest = pending[0]!;
+    expect((await expectMessage(oldest, "error")).code).toBe("too_many_connections");
+    expect((await oldest.waitClosed()).code).toBe(4003);
+    for (const peer of pending.slice(1)) expect(peer.closed).toBeNull();
+
+    // The newcomer is admitted, and the registered device was never a
+    // candidate for eviction.
+    newcomer.sendJson({ type: "attach", version: 1, device_id: encodeBase64(device.deviceId) });
+    const attached = await expectMessage(newcomer, "attached");
+    expect((await expectMessage(daemon, "peer_state")).connectionId).toBe(attached.connectionId);
+    expect(daemon.closed).toBeNull();
+
+    daemon.close();
+    newcomer.close();
+    for (const peer of pending) peer.close();
+  });
+
+  it("evicts an idle client when every client slot is taken", async () => {
+    const device = await createDevice();
+    const daemon = await connectRegisteredDevice(device);
+    const clients: TestPeer[] = [];
+    for (let i = 0; i < LIMITS.maxClients; i++) {
+      clients.push(await connectAttachedClient(device.deviceIdText, device.deviceId));
+      await expectMessage(daemon, "peer_state");
+    }
+
+    // One client has been silent past the idle threshold.
+    const idle = clients[1]!;
+    await editSockets(device, (s) =>
+      s["connectionId"] === idle.connectionId
+        ? { ...s, lastActivity: Date.now() - LIMITS.clientIdleMs - 1 }
+        : null,
+    );
+
+    const newcomer = await connectAttachedClient(device.deviceIdText, device.deviceId);
+
+    expect((await expectMessage(idle, "error")).code).toBe("too_many_connections");
+    expect((await idle.waitClosed()).code).toBe(4003);
+
+    // The device learns exactly which client left and which arrived.
+    expect(await expectMessage(daemon, "peer_state")).toEqual({
+      type: "peer_state",
+      connectionId: idle.connectionId,
+      present: false,
+    });
+    expect(await expectMessage(daemon, "peer_state")).toEqual({
+      type: "peer_state",
+      connectionId: newcomer.connectionId,
+      present: true,
+    });
+    for (const client of clients) if (client !== idle) expect(client.closed).toBeNull();
+
+    daemon.close();
+    newcomer.close();
+    for (const client of clients) client.close();
+  });
+});
+
+describe("registration races", () => {
+  it("consumes the challenge before verifying, so a repeat on the socket is refused", async () => {
+    const device = await createDevice();
+    const peer = await TestPeer.connect(device.deviceIdText);
+    const challenge = await peer.challenge();
+    const register = await buildRegister(device, { challenge });
+
+    // Both arrive before the first verification finishes.
+    peer.send(register);
+    peer.send(register);
+
+    const replies = [await peer.next(), await peer.next()];
+    const types = replies.map((r) => r.type).sort();
+    expect(types).toEqual(["error", "registered"]);
+    const error = replies.find((r) => r.type === "error");
+    expect(error).toMatchObject({ code: "bad_request" });
+    expect(peer.closed).toBeNull();
+    peer.close();
+  });
+
+  it("refuses an attach sent while a registration is being verified", async () => {
+    const device = await createDevice();
+    const peer = await TestPeer.connect(device.deviceIdText);
+    const challenge = await peer.challenge();
+
+    peer.send(await buildRegister(device, { challenge }));
+    peer.sendJson({ type: "attach", version: 1, device_id: encodeBase64(device.deviceId) });
+
+    const replies = [await peer.next(), await peer.next()];
+    expect(replies.map((r) => r.type).sort()).toEqual(["error", "registered"]);
+
+    // The socket ended up as the device, not as a client.
+    const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    expect((await expectMessage(peer, "peer_state")).connectionId).toBe(phone.connectionId);
+    peer.close();
+    phone.close();
+  });
+});

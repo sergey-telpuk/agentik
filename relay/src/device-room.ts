@@ -60,30 +60,55 @@ export interface Env {
 export const LIMITS = {
   /** Largest frame payload the relay will forward, in bytes. */
   maxFrameBytes: 32 * 1024,
-  /** How long an unauthenticated socket may stay open. */
+  /**
+   * How long a socket may stay unauthenticated (neither registered nor
+   * attached). Past it the socket is closed, whether or not it ever sends.
+   */
   challengeTtlMs: 30_000,
+  /**
+   * Unauthenticated sockets per device. When full, the oldest is evicted to
+   * admit a new one, so stale sockets cannot lock out a real peer.
+   */
+  maxPending: 8,
   /** Clients attached to one device at once. */
   maxClients: 4,
+  /**
+   * A client with no frames in either direction for this long counts as
+   * idle, and may be evicted when all client slots are taken.
+   */
+  clientIdleMs: 30_000,
   /** Frames per second from one socket, averaged over the window. */
   maxFramesPerWindow: 120,
   /** Length of the rate-limiting window. */
   rateWindowMs: 1_000,
 } as const;
 
-/** Per-socket state, stored as a hibernation attachment. */
+/**
+ * Per-socket state, stored as a hibernation attachment.
+ *
+ * Roles: `pending` holds an unused challenge; `verifying` has consumed it
+ * and is awaiting signature verification; `device` and `client` are
+ * established; `closing` was closed by the relay and is ignored from then on.
+ */
 interface SocketState {
   /** What this socket is allowed to do. */
-  role: "pending" | "device" | "client";
-  /** Base64 challenge issued to this socket, cleared once registered. */
+  role: "pending" | "verifying" | "device" | "client" | "closing";
+  /** Base64 challenge issued to this socket, cleared once consumed. */
   challenge?: string;
-  /** When the challenge stops being acceptable (epoch ms). */
+  /** When the socket must have authenticated by (epoch ms). */
   challengeExpiresAt?: number;
   /** Relay-assigned identifier of an attached client. */
   connectionId?: string;
+  /** Last frame sent by or delivered to a client (epoch ms). */
+  lastActivity?: number;
   /** Start of the current rate-limit window (epoch ms). */
   windowStart: number;
   /** Frames seen in the current window. */
   windowCount: number;
+}
+
+function isUnauthenticated(state: SocketState): boolean {
+  return state.role === "pending" || state.role === "verifying";
 }
 
 /**
@@ -121,6 +146,10 @@ export class DeviceRoom implements DurableObject {
       return new Response("expected a WebSocket upgrade", { status: 426 });
     }
 
+    const now = Date.now();
+    this.#sweepExpired(now);
+    this.#makeRoomForPending();
+
     const pair = new WebSocketPair();
     const [clientSide, serverSide] = Object.values(pair) as [WebSocket, WebSocket];
 
@@ -130,13 +159,13 @@ export class DeviceRoom implements DurableObject {
 
     const challenge = crypto.getRandomValues(new Uint8Array(CHALLENGE_SIZE));
     const challengeText = encodeBase64(challenge);
-    const expiresAt = Date.now() + LIMITS.challengeTtlMs;
+    const expiresAt = now + LIMITS.challengeTtlMs;
 
     writeState(serverSide, {
       role: "pending",
       challenge: challengeText,
       challengeExpiresAt: expiresAt,
-      windowStart: Date.now(),
+      windowStart: now,
       windowCount: 0,
     });
 
@@ -147,7 +176,27 @@ export class DeviceRoom implements DurableObject {
       expiresAt: Math.floor(expiresAt / 1000),
     });
 
+    // A socket that never sends anything would otherwise never be looked at
+    // again. The alarm wakes the object at the deadline without a timer that
+    // would keep it from hibernating.
+    await this.#scheduleSweep(expiresAt);
+
     return new Response(null, { status: 101, webSocket: clientSide });
+  }
+
+  /** Closes unauthenticated sockets whose deadline has passed. */
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    this.#sweepExpired(now);
+
+    let next: number | null = null;
+    for (const ws of this.#state.getWebSockets()) {
+      const state = readState(ws);
+      if (state === null || !isUnauthenticated(state)) continue;
+      if (state.challengeExpiresAt === undefined) continue;
+      if (next === null || state.challengeExpiresAt < next) next = state.challengeExpiresAt;
+    }
+    if (next !== null) await this.#state.storage.setAlarm(next);
   }
 
   /** Handles one inbound message. */
@@ -159,6 +208,14 @@ export class DeviceRoom implements DurableObject {
       this.#closeWith(ws, "internal", "connection state is unavailable");
       return;
     }
+    if (state.role === "closing") return;
+
+    const now = Date.now();
+    if (this.#isExpired(state, now)) {
+      this.#closeWith(ws, "expired", "challenge expired");
+      return;
+    }
+    this.#sweepExpired(now);
 
     // Binary frames are not part of the protocol: every message is JSON
     // with base64 payloads, which keeps parsing uniform.
@@ -176,7 +233,7 @@ export class DeviceRoom implements DurableObject {
     if (!parsed.ok) {
       // A malformed message is reported but does not close an established
       // session: a single bad frame should not drop a working connection.
-      if (state.role === "pending") {
+      if (isUnauthenticated(state)) {
         this.#closeWith(ws, parsed.code, parsed.message);
       } else {
         this.#send(ws, errorMessage(parsed.code, parsed.message));
@@ -184,26 +241,93 @@ export class DeviceRoom implements DurableObject {
       return;
     }
 
+    // The rate check rewrote the attachment; continue from what it stored.
+    const current = readState(ws) ?? state;
     switch (parsed.value.type) {
       case "register":
-        await this.#handleRegister(ws, state, parsed.value.payload);
+        await this.#handleRegister(ws, current, parsed.value.payload);
         return;
       case "attach":
-        this.#handleAttach(ws, state, parsed.value.payload);
+        this.#handleAttach(ws, current, parsed.value.payload);
         return;
       case "frame":
-        this.#handleFrame(ws, state, parsed.value.payload);
+        this.#handleFrame(ws, current, parsed.value.payload);
         return;
     }
   }
 
   /** Notifies the peer when a socket goes away. */
   async webSocketClose(ws: WebSocket): Promise<void> {
-    this.#announceDeparture(ws);
+    this.#markGone(ws);
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
-    this.#announceDeparture(ws);
+    this.#markGone(ws);
+  }
+
+  /** Announces a socket's departure once, however it ended. */
+  #markGone(ws: WebSocket): void {
+    const state = readState(ws);
+    if (state === null || state.role === "closing") return;
+    writeState(ws, { ...state, role: "closing" });
+    this.#announceDeparture(ws, state);
+  }
+
+  #isExpired(state: SocketState, now: number): boolean {
+    return (
+      isUnauthenticated(state) &&
+      (state.challengeExpiresAt === undefined || now >= state.challengeExpiresAt)
+    );
+  }
+
+  /** Closes every unauthenticated socket past its deadline. */
+  #sweepExpired(now: number): void {
+    for (const ws of this.#state.getWebSockets()) {
+      const state = readState(ws);
+      if (state !== null && this.#isExpired(state, now)) {
+        this.#closeWith(ws, "expired", "challenge expired");
+      }
+    }
+  }
+
+  /**
+   * Evicts the oldest unauthenticated sockets so a new one fits.
+   *
+   * Refusing the newcomer instead would let a peer that opens sockets and
+   * sends nothing hold every slot until the deadline, over and over.
+   */
+  #makeRoomForPending(): void {
+    const pending = this.#state
+      .getWebSockets()
+      .map((ws) => ({ ws, state: readState(ws) }))
+      .filter((entry) => entry.state !== null && isUnauthenticated(entry.state))
+      .sort(
+        (a, b) => (a.state?.challengeExpiresAt ?? 0) - (b.state?.challengeExpiresAt ?? 0),
+      );
+    while (pending.length >= LIMITS.maxPending) {
+      const oldest = pending.shift();
+      if (oldest === undefined) break;
+      this.#send(
+        oldest.ws,
+        errorMessage("too_many_connections", "evicted to admit a newer connection"),
+      );
+      this.#drop(oldest.ws, CLOSE_CODES.evicted, "evicted");
+    }
+  }
+
+  async #scheduleSweep(at: number): Promise<void> {
+    const current = await this.#state.storage.getAlarm();
+    if (current === null || current > at) {
+      await this.#state.storage.setAlarm(at);
+    }
+  }
+
+  /**
+   * Reports whether a registration in progress may continue after an await.
+   * The socket may have expired, been evicted, or closed in the meantime.
+   */
+  #stillVerifying(ws: WebSocket): boolean {
+    return readState(ws)?.role === "verifying";
   }
 
   /**
@@ -231,9 +355,23 @@ export class DeviceRoom implements DurableObject {
     payload: RegisterPayload,
   ): Promise<void> {
     if (state.role !== "pending") {
-      this.#send(ws, errorMessage("bad_request", "this connection is already registered"));
+      this.#send(ws, errorMessage("bad_request", "this connection is already registered or attached"));
       return;
     }
+
+    // The challenge is consumed before the first await. Verification yields
+    // to other events on this socket, and a second register or attach
+    // arriving meanwhile must not find the challenge still unused.
+    const expectedChallenge = state.challenge ? decodeBase64(state.challenge) : null;
+    const challengeExpiresAt = state.challengeExpiresAt;
+    const consumed: SocketState = {
+      role: "verifying",
+      windowStart: state.windowStart,
+      windowCount: state.windowCount,
+    };
+    if (challengeExpiresAt !== undefined) consumed.challengeExpiresAt = challengeExpiresAt;
+    writeState(ws, consumed);
+
     if (payload.version !== VERSION) {
       this.#closeWith(ws, "unsupported_version", "unsupported protocol version");
       return;
@@ -244,12 +382,11 @@ export class DeviceRoom implements DurableObject {
       return;
     }
 
-    const expectedChallenge = state.challenge ? decodeBase64(state.challenge) : null;
-    if (expectedChallenge === null || state.challengeExpiresAt === undefined) {
+    if (expectedChallenge === null || challengeExpiresAt === undefined) {
       this.#closeWith(ws, "internal", "no challenge was issued for this connection");
       return;
     }
-    if (Date.now() > state.challengeExpiresAt) {
+    if (Date.now() >= challengeExpiresAt) {
       this.#closeWith(ws, "expired", "challenge expired");
       return;
     }
@@ -275,6 +412,7 @@ export class DeviceRoom implements DurableObject {
     // The device identifier is recomputed from the key rather than trusted,
     // so a request cannot claim an address belonging to a different key.
     const derivedId = await sha256(payload.registerPublicKey);
+    if (!this.#stillVerifying(ws)) return;
     if (!constantTimeEqual(payload.deviceId, derivedId)) {
       this.#closeWith(ws, "unauthorized", "device id does not match the registration key");
       return;
@@ -290,25 +428,27 @@ export class DeviceRoom implements DurableObject {
 
     const signed = registerSigningBytes(toRegisterRequest(payload));
     const valid = await verifyEd25519(payload.registerPublicKey, signed, payload.signature);
+    if (!this.#stillVerifying(ws)) return;
     if (!valid) {
       this.#closeWith(ws, "unauthorized", "signature verification failed");
       return;
     }
 
-    // Proof of the same key replaces an older device connection. An
-    // unauthorized peer cannot reach this point, so it cannot evict a
-    // running daemon.
-    for (const other of this.#sockets("device")) {
-      if (other !== ws) {
-        this.#closeSocket(other, CLOSE_CODES.replaced, "replaced by a newer registration");
-      }
-    }
-
+    const previous = this.#sockets("device").filter((other) => other !== ws);
     writeState(ws, {
       role: "device",
-      windowStart: Date.now(),
-      windowCount: 0,
+      windowStart: state.windowStart,
+      windowCount: state.windowCount,
     });
+
+    // Proof of the same key replaces an older device connection. An
+    // unauthorized peer cannot reach this point, so it cannot evict a
+    // running daemon. The route stays present throughout, so clients are
+    // not told the device left; the presence update below tells them a new
+    // device connection (and so a new Noise session) is in place.
+    for (const other of previous) {
+      this.#drop(other, CLOSE_CODES.replaced, "replaced by a newer registration", false);
+    }
 
     // The device learns which clients are already waiting, so it can expect
     // their handshakes.
@@ -332,7 +472,7 @@ export class DeviceRoom implements DurableObject {
    */
   #handleAttach(ws: WebSocket, state: SocketState, payload: AttachPayload): void {
     if (state.role !== "pending") {
-      this.#send(ws, errorMessage("bad_request", "this connection is already attached"));
+      this.#send(ws, errorMessage("bad_request", "this connection is already registered or attached"));
       return;
     }
     if (payload.version !== VERSION) {
@@ -346,18 +486,32 @@ export class DeviceRoom implements DurableObject {
     }
 
     // Bounding attached clients keeps one device's route from being used to
-    // hold open an unbounded number of sockets.
-    if (this.#sockets("client").length >= LIMITS.maxClients) {
-      this.#closeWith(ws, "too_many_connections", "too many clients attached to this device");
-      return;
+    // hold open an unbounded number of sockets. When the slots are full, an
+    // idle client gives way to the newcomer, so sockets that attach and then
+    // sit silent cannot lock the paired phone out. Busy clients are never
+    // displaced, and the device connection is not a client slot at all.
+    const now = Date.now();
+    const clients = this.#sockets("client");
+    if (clients.length >= LIMITS.maxClients) {
+      const victim = this.#idlestClient(clients, now);
+      if (victim === null) {
+        this.#closeWith(ws, "too_many_connections", "too many clients attached to this device");
+        return;
+      }
+      this.#send(
+        victim,
+        errorMessage("too_many_connections", "evicted while idle to admit a newer client"),
+      );
+      this.#drop(victim, CLOSE_CODES.evicted, "evicted while idle");
     }
 
     const connectionId = newConnectionId();
     writeState(ws, {
       role: "client",
       connectionId,
-      windowStart: Date.now(),
-      windowCount: 0,
+      lastActivity: now,
+      windowStart: state.windowStart,
+      windowCount: state.windowCount,
     });
 
     const devices = this.#sockets("device");
@@ -387,7 +541,7 @@ export class DeviceRoom implements DurableObject {
    * accepted because the cloud took the bytes.
    */
   #handleFrame(ws: WebSocket, state: SocketState, payload: FramePayload): void {
-    if (state.role === "pending") {
+    if (state.role !== "device" && state.role !== "client") {
       this.#closeWith(ws, "not_registered", "register or attach before sending frames");
       return;
     }
@@ -406,6 +560,7 @@ export class DeviceRoom implements DurableObject {
         return;
       }
       this.#forward(target, serializeServerMessage(frameMessage(payload.data)));
+      this.#touch(target);
       return;
     }
 
@@ -439,11 +594,35 @@ export class DeviceRoom implements DurableObject {
     }
   }
 
-  /** Tells the remaining peers that one side disconnected. */
-  #announceDeparture(closing: WebSocket): void {
-    const state = readState(closing);
-    if (state === null || state.role === "pending") return;
+  /** Records traffic to a client, so it does not count as idle. */
+  #touch(client: WebSocket): void {
+    const state = readState(client);
+    if (state?.role === "client") writeState(client, { ...state, lastActivity: Date.now() });
+  }
 
+  /**
+   * Picks the client that has been idle longest, if any has been idle long
+   * enough to give way to a newcomer.
+   */
+  #idlestClient(clients: WebSocket[], now: number): WebSocket | null {
+    let victim: WebSocket | null = null;
+    let oldest = now - LIMITS.clientIdleMs;
+    for (const client of clients) {
+      const lastActivity = readState(client)?.lastActivity ?? 0;
+      if (lastActivity <= oldest) {
+        oldest = lastActivity;
+        victim = client;
+      }
+    }
+    return victim;
+  }
+
+  /**
+   * Tells the remaining peers that one side disconnected.
+   *
+   * `state` is the socket's state from before it was marked closing.
+   */
+  #announceDeparture(closing: WebSocket, state: SocketState): void {
     if (state.role === "client") {
       if (state.connectionId === undefined) return;
       for (const daemon of this.#sockets("device")) {
@@ -456,6 +635,7 @@ export class DeviceRoom implements DurableObject {
       return;
     }
 
+    if (state.role !== "device") return;
     const present = this.#sockets("device").some((s) => s !== closing);
     for (const client of this.#sockets("client")) {
       this.#send(client, { type: "peer_state", present });
@@ -490,7 +670,9 @@ export class DeviceRoom implements DurableObject {
       windowCount = 0;
     }
     windowCount += 1;
-    writeState(ws, { ...state, windowStart, windowCount });
+    const next: SocketState = { ...state, windowStart, windowCount };
+    if (state.role === "client") next.lastActivity = now;
+    writeState(ws, next);
     return windowCount <= LIMITS.maxFramesPerWindow;
   }
 
@@ -505,7 +687,23 @@ export class DeviceRoom implements DurableObject {
   /** Reports an error and closes the socket. */
   #closeWith(ws: WebSocket, code: ErrorCode, message: string): void {
     this.#send(ws, errorMessage(code, message));
-    this.#closeSocket(ws, CLOSE_CODES.protocolError, code);
+    this.#drop(ws, CLOSE_CODES.protocolError, code);
+  }
+
+  /**
+   * Closes a socket from the relay side.
+   *
+   * The socket is marked closing first, so it stops receiving frames and its
+   * close event is not announced a second time. Its peers are told it left
+   * unless `announce` is false.
+   */
+  #drop(ws: WebSocket, code: number, reason: string, announce = true): void {
+    const state = readState(ws);
+    if (state !== null && state.role !== "closing") {
+      writeState(ws, { ...state, role: "closing" });
+      if (announce) this.#announceDeparture(ws, state);
+    }
+    this.#closeSocket(ws, code, reason);
   }
 
   #closeSocket(ws: WebSocket, code: number, reason: string): void {
