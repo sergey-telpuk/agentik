@@ -80,7 +80,7 @@ interface SocketState {
   sourceIp?: string;
   /** Relay-assigned identifier of an attached client. */
   connectionId?: string;
-  /** Last frame sent by or delivered to a client (epoch ms). */
+  /** When a client attached or last had a frame forwarded either way (epoch ms). */
   lastActivity?: number;
   /** Start of the current rate-limit window (epoch ms). */
   windowStart: number;
@@ -611,6 +611,7 @@ export class DeviceRoom implements DurableObject {
         return;
       }
     }
+    this.#touch(ws);
   }
 
   /**
@@ -648,7 +649,11 @@ export class DeviceRoom implements DurableObject {
     return true;
   }
 
-  /** Records traffic to a client, so it does not count as idle. */
+  /**
+   * Records a frame forwarded to or from a client, so it does not count as
+   * idle. Nothing else counts: a malformed or refused message would
+   * otherwise let a client hold a slot by sending junk.
+   */
   #touch(client: WebSocket): void {
     const state = readState(client);
     if (state?.role === "client") writeState(client, { ...state, lastActivity: Date.now() });
@@ -724,9 +729,7 @@ export class DeviceRoom implements DurableObject {
       windowCount = 0;
     }
     windowCount += 1;
-    const next: SocketState = { ...state, windowStart, windowCount };
-    if (state.role === "client") next.lastActivity = now;
-    writeState(ws, next);
+    writeState(ws, { ...state, windowStart, windowCount });
     const allowed =
       state.role === "device" ? LIMITS.maxDeviceFramesPerWindow : LIMITS.maxFramesPerWindow;
     return windowCount <= allowed;

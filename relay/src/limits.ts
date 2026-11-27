@@ -80,8 +80,9 @@ export const LIMITS = {
   /** Clients attached to one device at once. */
   maxClients: 4,
   /**
-   * A client with no frames in either direction for this long counts as
-   * idle, and may be evicted when all client slots are taken.
+   * A client with no frames forwarded in either direction for this long
+   * counts as idle, and may be evicted when all client slots are taken.
+   * Malformed or refused messages and keepalive pings do not count.
    */
   clientIdleMs: 30_000,
   /** Messages per window from one client socket. */

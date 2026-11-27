@@ -197,6 +197,52 @@ describe("eviction under slot pressure", () => {
     newcomer.close();
     for (const client of clients) client.close();
   });
+
+  it("evicts a client whose only traffic is junk when the slots are needed", async () => {
+    const device = await createDevice();
+    const daemon = await connectRegisteredDevice(device);
+    const clients: TestPeer[] = [];
+    for (let i = 0; i < LIMITS.maxClients; i++) {
+      clients.push(await connectAttachedClient(device.deviceIdText, device.deviceId));
+      await expectMessage(daemon, "peer_state");
+    }
+    const [junk, sender, receiver, other] = clients as [TestPeer, TestPeer, TestPeer, TestPeer];
+
+    // Every client was last active one idle period ago, as if this were
+    // the next 25-second tick of a client that keeps sending junk.
+    await editSockets(device, (s) =>
+      s["role"] === "client" ? { ...s, lastActivity: Date.now() - LIMITS.clientIdleMs - 1 } : null,
+    );
+
+    // Malformed and refused messages do not count as activity...
+    junk.send("{}");
+    expect((await expectMessage(junk, "error")).code).toBe("bad_request");
+    junk.sendFrame(new Uint8Array([1]), "0".repeat(32));
+    expect((await expectMessage(junk, "error")).code).toBe("bad_request");
+
+    // ...while forwarded frames do, in either direction.
+    sender.sendFrame(new Uint8Array([2]));
+    expect((await expectMessage(daemon, "frame")).connectionId).toBe(sender.connectionId);
+    daemon.sendFrame(new Uint8Array([3]), receiver.connectionId);
+    await expectMessage(receiver, "frame");
+    other.sendFrame(new Uint8Array([4]));
+    expect((await expectMessage(daemon, "frame")).connectionId).toBe(other.connectionId);
+
+    const newcomer = await connectAttachedClient(device.deviceIdText, device.deviceId);
+
+    expect((await expectMessage(junk, "error")).code).toBe("too_many_connections");
+    expect((await junk.waitClosed()).code).toBe(4003);
+    expect(await expectMessage(daemon, "peer_state")).toEqual({
+      type: "peer_state",
+      connectionId: junk.connectionId,
+      present: false,
+    });
+    for (const client of [sender, receiver, other]) expect(client.closed).toBeNull();
+
+    daemon.close();
+    newcomer.close();
+    for (const client of clients) client.close();
+  });
 });
 
 describe("registration races", () => {
