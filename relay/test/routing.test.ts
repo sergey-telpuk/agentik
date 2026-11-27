@@ -16,7 +16,7 @@ import {
   expectMessage,
 } from "./helpers";
 import { LIMITS } from "../src/limits";
-import { maxMessageLength } from "../src/messages";
+import { KEEPALIVE_PING, maxMessageLength } from "../src/messages";
 import { decodeBase64, encodeBase64 } from "../src/protocol";
 
 describe("frame routing", () => {
@@ -385,6 +385,38 @@ describe("limits", () => {
 
     daemon.close();
     phone.close();
+  });
+
+  it("answers keepalive pings without counting them toward the rate limit", async () => {
+    const device = await createDevice();
+    const daemon = await connectRegisteredDevice(device);
+    const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    await expectMessage(daemon, "peer_state");
+
+    // Well past the per-window allowance: if pings reached the handler, the
+    // socket would be rate-limited and closed.
+    const pings = LIMITS.maxFramesPerWindow + 30;
+    for (let i = 0; i < pings; i++) phone.send(KEEPALIVE_PING);
+    for (let i = 0; i < pings; i++) {
+      expect(await phone.next()).toEqual({ type: "pong" });
+    }
+    expect(phone.closed).toBeNull();
+
+    // The connection still forwards frames, and the device saw none of it.
+    phone.sendFrame(new Uint8Array([5]));
+    expect((await expectMessage(daemon, "frame")).connectionId).toBe(phone.connectionId);
+
+    daemon.close();
+    phone.close();
+  });
+
+  it("answers keepalive before a socket has authenticated", async () => {
+    const device = await createDevice();
+    const peer = await TestPeer.connect(device.deviceIdText);
+    await peer.challenge();
+    peer.send(KEEPALIVE_PING);
+    expect(await peer.next()).toEqual({ type: "pong" });
+    peer.close();
   });
 
   it("rejects binary messages", async () => {

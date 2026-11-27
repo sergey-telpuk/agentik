@@ -19,6 +19,8 @@
 
 import {
   CLOSE_CODES,
+  KEEPALIVE_PING,
+  KEEPALIVE_PONG,
   type AttachPayload,
   type ErrorCode,
   type FramePayload,
@@ -112,6 +114,11 @@ export class DeviceRoom implements DurableObject {
   constructor(state: DurableObjectState, env: Env) {
     this.#state = state;
     this.#env = env;
+    // Keepalive is answered by the runtime, so it needs no timer here and
+    // never wakes the object; see KEEPALIVE_PING.
+    state.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair(KEEPALIVE_PING, KEEPALIVE_PONG),
+    );
   }
 
   /**

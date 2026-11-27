@@ -51,7 +51,9 @@ export type ServerMessage =
    */
   | { type: "frame"; data: string; connectionId?: string }
   /** `connectionId` is set when the error concerns one client connection. */
-  | { type: "error"; code: ErrorCode; message: string; connectionId?: string };
+  | { type: "error"; code: ErrorCode; message: string; connectionId?: string }
+  /** Keepalive reply, sent by the runtime; see KEEPALIVE_PING. */
+  | { type: "pong" };
 
 /**
  * Error codes are a closed set so a client can branch on them. The human
@@ -106,6 +108,19 @@ export interface FramePayload {
   data: Uint8Array;
   connectionId?: string;
 }
+
+/**
+ * Keepalive request and reply.
+ *
+ * The runtime answers KEEPALIVE_PING with KEEPALIVE_PONG itself, without
+ * waking the Durable Object, so keepalive costs no handler invocation, does
+ * not count toward the message rate, and does not prevent hibernation. The
+ * match is on the exact string: a peer must send these bytes verbatim, with
+ * no added whitespace. Any other spelling reaches the parser as an unknown
+ * message type.
+ */
+export const KEEPALIVE_PING = '{"type":"ping"}';
+export const KEEPALIVE_PONG = '{"type":"pong"}';
 
 /** Length of a connection identifier: 16 random bytes as lowercase hex. */
 export const CONNECTION_ID_LENGTH = 32;
