@@ -16,6 +16,8 @@ import (
 	"crypto/ecdh"
 	"errors"
 	"fmt"
+	"io"
+	"sync"
 
 	"github.com/flynn/noise"
 	"github.com/sergey-telpuk/agentik/daemon/internal/protocol"
@@ -92,6 +94,10 @@ type HandshakeState struct {
 
 // NewHandshake starts a Noise XX handshake.
 func NewHandshake(cfg Config) (*HandshakeState, error) {
+	return newHandshake(cfg, nil)
+}
+
+func newHandshake(cfg Config, rng io.Reader) (*HandshakeState, error) {
 	if cfg.StaticKey == nil {
 		return nil, errors.New("secure: static key is required")
 	}
@@ -109,7 +115,7 @@ func NewHandshake(cfg Config) (*HandshakeState, error) {
 		Initiator:     cfg.Initiator,
 		StaticKeypair: static,
 		Prologue:      cfg.Prologue,
-		Random:        nil, // nil selects crypto/rand
+		Random:        rng, // nil selects crypto/rand
 	})
 	if err != nil {
 		return nil, fmt.Errorf("secure: start handshake: %w", err)
@@ -233,6 +239,8 @@ func (h *HandshakeState) Session() (*Session, error) {
 // new handshake rather than reusing these keys, so nonce sequences always
 // start fresh and an old message cannot be replayed into a new connection.
 type Session struct {
+	sendMu     sync.Mutex
+	recvMu     sync.Mutex
 	send, recv *noise.CipherState
 	peerStatic []byte
 }
@@ -247,6 +255,8 @@ func (s *Session) Encrypt(plaintext []byte) ([]byte, error) {
 	if len(plaintext) > MaxMessageSize {
 		return nil, fmt.Errorf("secure: message is %d bytes, limit is %d", len(plaintext), MaxMessageSize)
 	}
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
 	out, err := s.send.Encrypt(nil, nil, plaintext)
 	if err != nil {
 		return nil, fmt.Errorf("secure: encrypt: %w", err)
@@ -259,6 +269,8 @@ func (s *Session) Encrypt(plaintext []byte) ([]byte, error) {
 // Noise nonces advance strictly, so a replayed or reordered ciphertext fails
 // authentication rather than being accepted out of order.
 func (s *Session) Decrypt(ciphertext []byte) ([]byte, error) {
+	s.recvMu.Lock()
+	defer s.recvMu.Unlock()
 	out, err := s.recv.Decrypt(nil, nil, ciphertext)
 	if err != nil {
 		return nil, fmt.Errorf("secure: decrypt: %w", err)
