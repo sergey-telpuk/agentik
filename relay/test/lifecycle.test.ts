@@ -17,6 +17,7 @@ import {
   connectRegisteredDevice,
   createDevice,
   expectMessage,
+  uniqueSourceIp,
 } from "./helpers";
 import type { DeviceRoom } from "../src/device-room";
 import { LIMITS } from "../src/limits";
@@ -156,6 +157,45 @@ describe("eviction under slot pressure", () => {
     daemon.close();
     newcomer.close();
     for (const peer of pending) peer.close();
+  });
+
+  it("never evicts a registration in progress to admit new sockets", async () => {
+    const device = await createDevice();
+    const daemon = await TestPeer.connect(device.deviceIdText);
+    const challenge = await daemon.challenge();
+    const register = await buildRegister(device, { challenge });
+    const text = encodeBase64(challenge);
+    // The daemon's socket is the oldest, the first to go under the old rule.
+    await sleep(2);
+
+    const upgrade = () =>
+      new Request(`https://relay.test/v1/connect?device=${device.deviceIdText}`, {
+        headers: { Upgrade: "websocket", "CF-Connecting-IP": uniqueSourceIp() },
+      });
+    const arrivals = await runInDurableObject(roomFor(device), async (instance: DeviceRoom, state) => {
+      const ws = state
+        .getWebSockets()
+        .find((s) => (s.deserializeAttachment() as Attachment)["challenge"] === text);
+      if (ws === undefined) throw new Error("pending socket not found");
+      // Verification yields at its first await, so every socket below
+      // arrives while the daemon's registration is still being verified.
+      const verifying = instance.webSocketMessage(ws, register);
+      const responses = Array.from({ length: LIMITS.maxPending }, () => instance.fetch(upgrade()));
+      await verifying;
+      return (await Promise.all(responses)).map((r) => r.status);
+    });
+    expect(arrivals).toEqual(Array.from({ length: LIMITS.maxPending }, () => 101));
+
+    // The daemon completed its registration; one of the newcomers gave way.
+    expect((await expectMessage(daemon, "registered")).deviceId).toBe(device.deviceIdText);
+    expect(daemon.closed).toBeNull();
+    const stillPending = await runInDurableObject(roomFor(device), (_i, state) =>
+      state.getWebSockets().filter((s) => (s.deserializeAttachment() as Attachment)["role"] === "pending")
+        .length,
+    );
+    expect(stillPending).toBe(LIMITS.maxPending - 1);
+
+    daemon.close();
   });
 
   it("evicts an idle client when every client slot is taken", async () => {

@@ -288,15 +288,27 @@ export class DeviceRoom implements DurableObject {
    *
    * Refusing the newcomer instead would let a peer that opens sockets and
    * sends nothing hold every slot until the deadline, over and over.
+   *
+   * Sockets whose registration is being verified go last, and only when no
+   * other socket is left to evict: otherwise a burst of new sockets could
+   * evict a reconnecting daemon mid-verification. Every message from a
+   * pending socket either closes it or moves it on, so the pending sockets
+   * evicted first are ones that have sent nothing.
    */
   #makeRoomForPending(): void {
+    const order = (state: SocketState | null): [number, number] => [
+      state?.role === "verifying" ? 1 : 0,
+      state?.challengeExpiresAt ?? 0,
+    ];
     const pending = this.#state
       .getWebSockets()
       .map((ws) => ({ ws, state: readState(ws) }))
       .filter((entry) => entry.state !== null && isUnauthenticated(entry.state))
-      .sort(
-        (a, b) => (a.state?.challengeExpiresAt ?? 0) - (b.state?.challengeExpiresAt ?? 0),
-      );
+      .sort((a, b) => {
+        const [roleA, expiryA] = order(a.state);
+        const [roleB, expiryB] = order(b.state);
+        return roleA - roleB || expiryA - expiryB;
+      });
     while (pending.length >= LIMITS.maxPending) {
       const oldest = pending.shift();
       if (oldest === undefined) break;
