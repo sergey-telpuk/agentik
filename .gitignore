@@ -1,0 +1,13 @@
+# Build output
+/dist/
+/daemon/agentik
+/daemon/cmd/agentik/agentik
+
+# Local state: identity keys and task history never belong in the repository
+*.db
+*.db-wal
+*.db-shm
+identity.json
+
+# OS noise
+.DS_Store
