@@ -279,3 +279,43 @@ func insertClient(t *testing.T, db *DB, id int, key []byte) {
 		t.Fatal(err)
 	}
 }
+
+// TestModelColumnUpgradeKeepsExistingTasks reopens a database that is still at
+// schema v1 (no tasks.model) and checks that migration v2 adds the column
+// without losing rows, which then read back as "the agent's default model".
+func TestModelColumnUpgradeKeepsExistingTasks(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "agentik.db")
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTaskPrerequisites(t, db)
+	for _, stmt := range []string{
+		`ALTER TABLE tasks DROP COLUMN model`,
+		`DELETE FROM schema_migrations WHERE version = 2`,
+		`INSERT INTO tasks (id, session_id, client_id, prompt, state, created_at, updated_at)
+		 VALUES ('old', 's1', 1, 'before models', 'succeeded', 1, 1)`,
+	} {
+		if _, err := db.SQL().ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen at schema v1: %v", err)
+	}
+	defer db.Close()
+	var model string
+	if err := db.SQL().QueryRowContext(ctx, `SELECT model FROM tasks WHERE id = 'old'`).Scan(&model); err != nil {
+		t.Fatal(err)
+	}
+	if model != "" {
+		t.Fatalf("pre-existing task model = %q, want empty", model)
+	}
+}

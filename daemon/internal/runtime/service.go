@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sergey-telpuk/agentik/daemon/internal/agents"
 	"github.com/sergey-telpuk/agentik/daemon/internal/agents/codex"
 	"github.com/sergey-telpuk/agentik/daemon/internal/identity"
 	"github.com/sergey-telpuk/agentik/daemon/internal/pairing"
@@ -27,6 +28,7 @@ import (
 const (
 	defaultApprovalTTL  = 5 * time.Minute
 	maxPromptBytes      = 16 * 1024
+	maxModelIDBytes     = 128
 	maxRequestIDLen     = 128
 	maxResumeBatch      = 100
 	maxEventsPageBytes  = 20 * 1024
@@ -58,6 +60,10 @@ type Config struct {
 	// BeforeLaunchHook is an optional test seam invoked after committing
 	// state='starting' to SQLite and before starting the external agent.
 	BeforeLaunchHook func(ctx context.Context, taskID string) error
+
+	// Catalog lists detected agents and validates agent and model choices.
+	// When nil, a catalogue over Agents (without CLI discovery) is used.
+	Catalog *agents.Registry
 }
 
 type approvalWaiter struct {
@@ -83,6 +89,7 @@ type Service struct {
 	pairing          *pairing.Service
 	projects         *projects.Catalogue
 	agents           map[string]codex.Adapter
+	catalog          *agents.Registry
 	approvalTTL      time.Duration
 	now              func() time.Time
 	publish          EventSink
@@ -121,11 +128,16 @@ func NewService(ctx context.Context, cfg Config) (*Service, error) {
 	if ttl <= 0 {
 		ttl = defaultApprovalTTL
 	}
-	agents := make(map[string]codex.Adapter, len(cfg.Agents))
+	adapters := make(map[string]codex.Adapter, len(cfg.Agents))
 	for k, v := range cfg.Agents {
 		if v != nil {
-			agents[k] = v
+			adapters[k] = v
 		}
+	}
+
+	catalog := cfg.Catalog
+	if catalog == nil {
+		catalog = agents.NewRegistry(agents.Config{Adapters: adapters})
 	}
 
 	baseCtx, cancel := context.WithCancel(context.Background())
@@ -134,7 +146,8 @@ func NewService(ctx context.Context, cfg Config) (*Service, error) {
 		identity:         cfg.Identity,
 		pairing:          cfg.Pairing,
 		projects:         cfg.Projects,
-		agents:           agents,
+		agents:           adapters,
+		catalog:          catalog,
 		approvalTTL:      ttl,
 		now:              nowFn,
 		publish:          cfg.Publish,
@@ -526,11 +539,7 @@ func (s *Service) handleProjectList(ctx context.Context, sess *secure.ManagedSes
 }
 
 func (s *Service) handleAgentList(ctx context.Context, sess *secure.ManagedSession, req InboundRequest) {
-	out := make([]codex.AgentStatus, 0, len(s.agents))
-	for _, adapter := range s.agents {
-		out = append(out, adapter.Diagnose(ctx))
-	}
-	s.sendResult(ctx, sess, req.RequestID, AgentListResult{Agents: out})
+	s.sendResult(ctx, sess, req.RequestID, AgentListResult{Agents: s.catalog.List(ctx)})
 }
 
 func (s *Service) handleSessionList(ctx context.Context, sess *secure.ManagedSession, req InboundRequest) {
@@ -755,7 +764,12 @@ func (s *Service) handleTaskStart(ctx context.Context, sess *secure.ManagedSessi
 		ProjectID string  `json:"project_id"`
 		SessionID *string `json:"session_id"`
 		Agent     string  `json:"agent"`
-		Prompt    string  `json:"prompt"`
+		// AgentID is the preferred name of Agent; if both are sent they
+		// must agree.
+		AgentID string `json:"agent_id"`
+		// Model optionally selects a model from the agent's model list.
+		Model  string `json:"model"`
+		Prompt string `json:"prompt"`
 	}
 	if err := decodeStrictParams(req.Params, &params); err != nil {
 		s.sendError(ctx, sess, req.RequestID, "bad_request", err.Error())
@@ -780,8 +794,31 @@ func (s *Service) handleTaskStart(ctx context.Context, sess *secure.ManagedSessi
 		return
 	}
 	agentName := strings.TrimSpace(params.Agent)
+	if id := strings.TrimSpace(params.AgentID); id != "" {
+		if agentName != "" && agentName != id {
+			s.sendError(ctx, sess, req.RequestID, "bad_request", "agent and agent_id disagree")
+			return
+		}
+		agentName = id
+	}
 	if agentName == "" {
 		agentName = proj.AllowedAgent
+	}
+	requestedModel := strings.TrimSpace(params.Model)
+	if len(requestedModel) > maxModelIDBytes {
+		s.sendError(ctx, sess, req.RequestID, "bad_request", fmt.Sprintf("model exceeds %d bytes", maxModelIDBytes))
+		return
+	}
+	// A detected agent that Agentik cannot drive yet gets its own error
+	// rather than a generic "not permitted".
+	if _, registered := s.agents[agentName]; !registered {
+		if _, selErr := s.catalog.Resolve(ctx, agentName, ""); selErr != nil {
+			var se *agents.SelectionError
+			if errors.As(selErr, &se) && se.Code == agents.ErrCodeUnsupported {
+				s.sendError(ctx, sess, req.RequestID, "agent_unsupported", se.Message)
+				return
+			}
+		}
 	}
 	if !proj.AllowsAgent(agentName) {
 		s.sendError(ctx, sess, req.RequestID, "bad_request", fmt.Sprintf("agent %q is not permitted in project %q", agentName, proj.ID))
@@ -798,17 +835,49 @@ func (s *Service) handleTaskStart(ctx context.Context, sess *secure.ManagedSessi
 		reqSessionID = strings.TrimSpace(*params.SessionID)
 	}
 
-	encBytes, err := protocol.NewEncoder("agentik-task-start-v1").
+	enc := protocol.NewEncoder("agentik-task-start-v1").
 		AddString(proj.ID).
 		AddString(reqSessionID).
 		AddString(agentName).
-		AddString(params.Prompt).
-		Bytes()
+		AddString(params.Prompt)
+	if requestedModel != "" {
+		// Added only when set, so the hash of a request without a model is
+		// the same as before model selection existed.
+		enc = enc.AddString(requestedModel)
+	}
+	encBytes, err := enc.Bytes()
 	if err != nil {
 		s.sendError(ctx, sess, req.RequestID, "bad_request", err.Error())
 		return
 	}
 	contentHash := sha256.Sum256(encBytes)
+
+	// Validate the model only for a request that has not been accepted yet:
+	// a retry of an accepted request returns the original task whatever the
+	// model list looks like now. This runs before the transaction because it
+	// may start the agent CLI.
+	if !s.alreadyAccepted(ctx, client.ID, req.RequestID, contentHash[:]) {
+		sel, selErr := s.catalog.Resolve(ctx, agentName, requestedModel)
+		if selErr != nil {
+			code := "bad_request"
+			var se *agents.SelectionError
+			if errors.As(selErr, &se) {
+				switch se.Code {
+				case agents.ErrCodeUnsupported:
+					code = "agent_unsupported"
+				case agents.ErrCodeNotReady:
+					code = "agent_not_ready"
+				case agents.ErrCodeUnknownModel:
+					code = "unknown_model"
+				default:
+					code = "agent_unavailable"
+				}
+			}
+			s.sendError(ctx, sess, req.RequestID, code, selErr.Error())
+			return
+		}
+		requestedModel = sel.Model
+	}
 
 	tx, err := s.db.SQL().BeginTx(ctx, nil)
 	if err != nil {
@@ -919,9 +988,9 @@ func (s *Service) handleTaskStart(ctx context.Context, sess *secure.ManagedSessi
 
 	// 4. Write task='accepted', command dedup record, and initial event atomically.
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO tasks (id, session_id, client_id, prompt, state, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, 'accepted', ?, ?)`,
-		taskID, sessionID, client.ID, params.Prompt, nowUnix, nowUnix,
+		`INSERT INTO tasks (id, session_id, client_id, prompt, model, state, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?)`,
+		taskID, sessionID, client.ID, params.Prompt, requestedModel, nowUnix, nowUnix,
 	); err != nil {
 		s.sendError(ctx, sess, req.RequestID, "internal", "failed to persist task")
 		return
@@ -959,7 +1028,19 @@ func (s *Service) handleTaskStart(ctx context.Context, sess *secure.ManagedSessi
 	s.emitLiveEvent("session.event", initEvent)
 
 	s.wg.Add(1)
-	go s.executeTask(taskID, sessionID, proj, adapter, agentThreadID, params.Prompt)
+	go s.executeTask(taskID, sessionID, proj, adapter, agentThreadID, params.Prompt, requestedModel)
+}
+
+// alreadyAccepted reports whether a task.start with this client, request id
+// and content hash has already been recorded.
+func (s *Service) alreadyAccepted(ctx context.Context, clientID int64, requestID string, hash []byte) bool {
+	var method string
+	var stored []byte
+	err := s.db.SQL().QueryRowContext(ctx,
+		`SELECT method, content_hash FROM commands WHERE client_id = ? AND request_id = ?`,
+		clientID, requestID,
+	).Scan(&method, &stored)
+	return err == nil && method == "task.start" && protocol.ConstantTimeEqual(stored, hash)
 }
 
 func (s *Service) executeTask(
@@ -969,6 +1050,7 @@ func (s *Service) executeTask(
 	adapter codex.Adapter,
 	agentThreadID string,
 	prompt string,
+	model string,
 ) {
 	defer s.wg.Done()
 
@@ -1021,6 +1103,7 @@ func (s *Service) executeTask(
 		ProjectRoot: proj.Root,
 		ThreadID:    agentThreadID,
 		Prompt:      prompt,
+		Model:       model,
 	}, codex.TurnCallbacks{
 		OnStarted: func(threadID, turnID string) {
 			if threadID != "" {
@@ -1747,13 +1830,13 @@ func (s *Service) loadTaskTx(ctx context.Context, tx *sql.Tx, taskID string) (Ta
 	var stateStr string
 	var resultText, errText sql.NullString
 	err := tx.QueryRowContext(ctx,
-		`SELECT t.id, t.session_id, a.project_id, a.adapter, t.prompt, t.state,
+		`SELECT t.id, t.session_id, a.project_id, a.adapter, t.model, t.prompt, t.state,
 		        t.result, t.error, t.created_at, t.updated_at
 		 FROM tasks t
 		 JOIN agent_sessions a ON t.session_id = a.id
 		 WHERE t.id = ?`,
 		taskID,
-	).Scan(&v.TaskID, &v.SessionID, &v.ProjectID, &v.Agent, &v.Prompt, &stateStr, &resultText, &errText, &v.CreatedAt, &v.UpdatedAt)
+	).Scan(&v.TaskID, &v.SessionID, &v.ProjectID, &v.Agent, &v.Model, &v.Prompt, &stateStr, &resultText, &errText, &v.CreatedAt, &v.UpdatedAt)
 	if err != nil {
 		return TaskView{}, err
 	}

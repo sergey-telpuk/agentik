@@ -93,7 +93,42 @@ func TestHelperProcess(t *testing.T) {
 				"id":     req.ID,
 				"result": map[string]any{"thread": map[string]any{"id": threadID}},
 			})
+		case "model/list":
+			var p struct {
+				Cursor string `json:"cursor"`
+			}
+			_ = json.Unmarshal(req.Params, &p)
+			if mode == "models_error" {
+				writeMsg(map[string]any{"id": req.ID, "error": map[string]any{"code": -32601, "message": "unknown method"}})
+				break
+			}
+			// A stray notification must not be mistaken for the response.
+			writeMsg(map[string]any{"method": "remoteControl/status/changed", "params": map[string]any{}})
+			if p.Cursor == "" {
+				writeMsg(map[string]any{"id": req.ID, "result": map[string]any{
+					"data": []map[string]any{
+						{"id": "m-big", "model": "m-big", "displayName": "Big", "description": "Largest", "hidden": false, "isDefault": true},
+						{"id": "m-hidden", "model": "m-hidden", "displayName": "Hidden", "hidden": true, "isDefault": false},
+					},
+					"nextCursor": "page2",
+				}})
+			} else {
+				writeMsg(map[string]any{"id": req.ID, "result": map[string]any{
+					"data": []map[string]any{
+						{"id": "m-small", "model": "m-small", "displayName": "Small", "hidden": false, "isDefault": false},
+					},
+					"nextCursor": nil,
+				}})
+			}
 		case "turn/start":
+			var tp struct {
+				Model string `json:"model"`
+			}
+			_ = json.Unmarshal(req.Params, &tp)
+			helloText := "Hello world"
+			if mode == "echo_model" {
+				helloText = "model=" + tp.Model
+			}
 			writeMsg(map[string]any{
 				"id":     req.ID,
 				"result": map[string]any{"turn": map[string]any{"id": turnID}},
@@ -166,7 +201,7 @@ func TestHelperProcess(t *testing.T) {
 					"params": map[string]any{
 						"threadId": threadID,
 						"turnId":   turnID,
-						"item":     map[string]any{"type": "agentMessage", "id": "msg-1", "text": "Hello world"},
+						"item":     map[string]any{"type": "agentMessage", "id": "msg-1", "text": helloText},
 					},
 				})
 				writeMsg(map[string]any{
@@ -177,7 +212,7 @@ func TestHelperProcess(t *testing.T) {
 							"id":     turnID,
 							"status": "completed",
 							"items": []map[string]any{
-								{"type": "agentMessage", "text": "Hello world"},
+								{"type": "agentMessage", "text": helloText},
 							},
 						},
 					},
@@ -305,6 +340,46 @@ func TestStartTurnApprovalCancelAndCrash(t *testing.T) {
 	res = turn.Wait()
 	if res.Status != OutcomeTransportLost {
 		t.Fatalf("expected OutcomeTransportLost on crash, got %+v", res)
+	}
+}
+
+func TestModelsLiveListSkipsHiddenAndFollowsPages(t *testing.T) {
+	cat := fakeAdapter("normal").Models(context.Background())
+	if cat.Source != ModelSourceLive {
+		t.Fatalf("source = %q (%s), want live", cat.Source, cat.Detail)
+	}
+	if len(cat.Models) != 2 || cat.Models[0].ID != "m-big" || !cat.Models[0].IsDefault ||
+		cat.Models[0].DisplayName != "Big" || cat.Models[1].ID != "m-small" {
+		t.Fatalf("unexpected models: %+v", cat.Models)
+	}
+}
+
+func TestModelsFallBackToLabelledStaticWhenQueryFails(t *testing.T) {
+	cat := fakeAdapter("models_error").Models(context.Background())
+	if cat.Source != ModelSourceStatic || len(cat.Models) != 0 || cat.Detail == "" {
+		t.Fatalf("expected empty static fallback with a reason, got %+v", cat)
+	}
+	missing := NewAdapter(Config{Binary: "/nonexistent/agentik-codex-binary"}).Models(context.Background())
+	if missing.Source != ModelSourceStatic || len(missing.Models) != 0 {
+		t.Fatalf("missing binary: %+v", missing)
+	}
+}
+
+func TestStartTurnPassesSelectedModel(t *testing.T) {
+	run := func(model string) TurnResult {
+		turn, err := fakeAdapter("echo_model").StartTurn(context.Background(), StartTurnRequest{
+			ProjectRoot: t.TempDir(), Prompt: "hi", Model: model,
+		}, TurnCallbacks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return turn.Wait()
+	}
+	if res := run("m-small"); res.ResultText != "model=m-small" {
+		t.Fatalf("selected model not forwarded: %+v", res)
+	}
+	if res := run(""); res.ResultText != "model=" {
+		t.Fatalf("empty model must not be forwarded: %+v", res)
 	}
 }
 

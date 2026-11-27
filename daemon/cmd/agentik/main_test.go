@@ -48,7 +48,7 @@ func TestRunStatusAndInvalidProject(t *testing.T) {
 	var out, errOut bytes.Buffer
 	err := run(
 		context.Background(),
-		[]string{"--data-dir", dataDir, "--project", "app=" + projDir, "--codex-bin", "nonexistent-codex-xyz", "--status"},
+		[]string{"--data-dir", dataDir, "--project", "app=" + projDir, "--codex-bin", "nonexistent-codex-xyz", "--agent-search-path", t.TempDir(), "--status"},
 		strings.NewReader(""),
 		&out,
 		&errOut,
@@ -73,6 +73,42 @@ func TestRunStatusAndInvalidProject(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected missing project directory error")
+	}
+}
+
+func TestRunStatusListsDetectedAgents(t *testing.T) {
+	bin := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("codex", `case "$1" in --version) echo "codex-cli 1.2.3";; login) echo "Logged in using ChatGPT";; esac`)
+	write("claude", `case "$1" in --version) echo "2.0.0 (Claude Code)";; auth) echo '{"loggedIn": true}';; esac`)
+
+	var out, errOut bytes.Buffer
+	err := run(context.Background(), []string{
+		"--data-dir", filepath.Join(t.TempDir(), "data"),
+		"--agent-search-path", bin,
+		"--status",
+	}, strings.NewReader(""), &out, &errOut)
+	if err != nil {
+		t.Fatalf("status failed: %v (stderr=%s)", err, errOut.String())
+	}
+	got := out.String()
+	for _, want := range []string{
+		"agents:",
+		`codex         status=ready supported=true version="codex-cli 1.2.3"`,
+		`claude        status=unsupported supported=false version="2.0.0 (Claude Code)"`,
+		"not supported yet",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, bin) {
+		t.Fatalf("status output must not print binary paths:\n%s", got)
 	}
 }
 
@@ -145,6 +181,7 @@ func TestRunDaemonLifecycleWithFakeRelay(t *testing.T) {
 			ctx,
 			[]string{
 				"--data-dir", dataDir,
+				"--agent-search-path", t.TempDir(),
 				"--relay", "ws" + strings.TrimPrefix(srv.URL, "http"),
 				"--relay-id", "test-relay",
 				"--project", projDir,

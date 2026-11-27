@@ -6,7 +6,7 @@ package runtime
 import (
 	"encoding/json"
 
-	"github.com/sergey-telpuk/agentik/daemon/internal/agents/codex"
+	"github.com/sergey-telpuk/agentik/daemon/internal/agents"
 )
 
 // ProtocolVersion is the inner JSON protocol version carried inside Noise.
@@ -89,6 +89,10 @@ type TaskView struct {
 	PendingApproval *PendingApprovalView `json:"pending_approval"`
 	CreatedAt       int64                `json:"created_at"`
 	UpdatedAt       int64                `json:"updated_at"`
+
+	// Model is the model the task was started with; empty means the agent's
+	// own default model.
+	Model string `json:"model"`
 }
 
 // ProjectInfo is the wire view of a configured local project. Paths are
@@ -161,9 +165,11 @@ type ChangesResult struct {
 	Truncated bool   `json:"truncated"`
 }
 
-// AgentListResult reports registered agent adapters and their local availability.
+// AgentListResult reports every detected agent with its readiness and models.
+// Each entry still carries the original name/available/authenticated/version/
+// detail/capabilities fields.
 type AgentListResult struct {
-	Agents []codex.AgentStatus `json:"agents"`
+	Agents []agents.Entry `json:"agents"`
 }
 
 // PairUpdatedEventData is pushed when a local operator confirms or rejects a pairing.

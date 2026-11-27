@@ -28,6 +28,39 @@ type StartTurnRequest struct {
 	ThreadID string
 	// Prompt is the user task prompt.
 	Prompt string
+	// Model optionally selects the model for this turn. Empty means the
+	// agent's own default. The runtime validates it against the agent's
+	// model catalogue before it reaches an adapter.
+	Model string
+}
+
+// Model describes one model an agent can run.
+type Model struct {
+	// ID is the value passed back as StartTurnRequest.Model.
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	Description string `json:"description,omitempty"`
+	// IsDefault marks the model the agent uses when none is selected.
+	IsDefault bool `json:"is_default"`
+}
+
+// ModelSource says where a model list came from.
+type ModelSource string
+
+const (
+	// ModelSourceLive means the list was read from the agent itself.
+	ModelSourceLive ModelSource = "live"
+	// ModelSourceStatic means the list is a built-in fallback because the
+	// agent could not be queried.
+	ModelSourceStatic ModelSource = "static"
+)
+
+// ModelCatalog is the set of models one agent can run.
+type ModelCatalog struct {
+	Models []Model     `json:"models"`
+	Source ModelSource `json:"source"`
+	// Detail explains a static fallback (why the live query failed).
+	Detail string `json:"detail,omitempty"`
 }
 
 // ApprovalKind identifies the type of operation Codex asks to approve.

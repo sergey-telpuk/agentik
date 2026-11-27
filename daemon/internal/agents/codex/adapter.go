@@ -291,7 +291,7 @@ func (t *appServerTurn) handshakeAndStart(ctx context.Context, clientVersion str
 	t.threadID = threadResp.Thread.ID
 	t.stateMu.Unlock()
 
-	turnRaw, err := t.call(ctx, "turn/start", map[string]any{
+	turnParams := map[string]any{
 		"threadId":       threadResp.Thread.ID,
 		"cwd":            req.ProjectRoot,
 		"approvalPolicy": "on-request",
@@ -302,7 +302,11 @@ func (t *appServerTurn) handshakeAndStart(ctx context.Context, clientVersion str
 				"text_elements": []any{},
 			},
 		},
-	})
+	}
+	if model := strings.TrimSpace(req.Model); model != "" {
+		turnParams["model"] = model
+	}
+	turnRaw, err := t.call(ctx, "turn/start", turnParams)
 	if err != nil {
 		return fmt.Errorf("codex turn/start: %w", err)
 	}

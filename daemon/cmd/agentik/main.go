@@ -21,7 +21,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sergey-telpuk/agentik/daemon/internal/agents"
 	"github.com/sergey-telpuk/agentik/daemon/internal/agents/codex"
+	"github.com/sergey-telpuk/agentik/daemon/internal/agents/discovery"
 	"github.com/sergey-telpuk/agentik/daemon/internal/identity"
 	"github.com/sergey-telpuk/agentik/daemon/internal/pairing"
 	"github.com/sergey-telpuk/agentik/daemon/internal/projects"
@@ -116,6 +118,8 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	pairTTL := fs.Duration("pair-ttl", defaultPairTTL, "lifetime of newly issued pairing invitations")
 	telegramBotID := fs.Int64("telegram-bot-id", 0, "expected Telegram bot id for initData verification (0 disables)")
 	codexBin := fs.String("codex-bin", "codex", "path or command name for codex CLI")
+	agentSearchPath := fs.String("agent-search-path", "", "PATH-style list of directories to search for agent CLIs, "+
+		"instead of PATH and the usual install locations")
 
 	var configuredProjects projectFlagList
 	fs.Var(&configuredProjects, "project", "permitted project as id=path or path (repeatable)")
@@ -152,6 +156,18 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	codexAdapter := codex.NewAdapter(codex.Config{Binary: *codexBin})
 	codexDiag := codexAdapter.Diagnose(ctx)
 
+	discCfg := discovery.Config{Overrides: map[string]string{codex.AgentName: *codexBin}}
+	if *agentSearchPath != "" {
+		discCfg.PathEnv = *agentSearchPath
+	} else {
+		home, _ := os.UserHomeDir()
+		discCfg.ExtraDirs = discovery.WellKnownDirs(home)
+	}
+	catalog := agents.NewRegistry(agents.Config{
+		Adapters:   map[string]codex.Adapter{codex.AgentName: codexAdapter},
+		Discoverer: discovery.New(discCfg),
+	})
+
 	if created {
 		fmt.Fprintln(out, "Created a new device identity.")
 	}
@@ -166,8 +182,26 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	fmt.Fprintln(out)
 
 	if *showStatus {
+		fmt.Fprintln(out, "agents:")
+		for _, e := range catalog.List(ctx) {
+			fmt.Fprintf(out, "  %-13s status=%s supported=%v", e.ID, e.Status, e.Supported)
+			if e.Version != "" {
+				fmt.Fprintf(out, " version=%q", e.Version)
+			}
+			if len(e.Models) > 0 {
+				fmt.Fprintf(out, " models=%d (%s)", len(e.Models), e.ModelsSource)
+			}
+			fmt.Fprintln(out)
+			if e.Status == agents.StatusUnsupported {
+				fmt.Fprintf(out, "                %s\n", e.StatusText)
+			}
+		}
 		return nil
 	}
+
+	// Warm the agent cache in the background so the first agent.list from a
+	// phone is not the one that pays for running the CLIs.
+	go catalog.List(ctx)
 
 	normalizedRelay, err := pairing.NormalizeRelayURL(*relayURL)
 	if err != nil {
@@ -207,6 +241,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 			Pairing:  pairSvc,
 			Projects: cat,
 			Agents:   map[string]codex.Adapter{codex.AgentName: codexAdapter},
+			Catalog:  catalog,
 		},
 		sender,
 		func(connID string, secErr error) {

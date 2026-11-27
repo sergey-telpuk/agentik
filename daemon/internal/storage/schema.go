@@ -126,4 +126,14 @@ var migrations = []migration{
 			)`,
 		},
 	},
+	{
+		version: 2,
+		name:    "task model selection",
+		stmts: []string{
+			// The model a task was started with. Empty means the agent's own
+			// default model; it is recorded so an idempotent retry and the
+			// task history report what was actually requested.
+			`ALTER TABLE tasks ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
