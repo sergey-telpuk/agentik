@@ -272,7 +272,13 @@ func TestTerminalOnlyOpensInPermittedProjects(t *testing.T) {
 	for _, id := range []string{"nope", "../proj-a", "/", h.projDirA} {
 		wantError(t, tc.call("terminal.open", map[string]any{"project_id": id}), "not_found")
 	}
-	wantError(t, tc.call("terminal.open", map[string]any{}), "bad_request")
+	// No project opens a shell in the home directory: a terminal is how
+	// someone looks around before deciding what a project is. A path from
+	// the network is still refused, which the cases above cover.
+	opened := tc.call("terminal.open", map[string]any{})
+	if !opened.OK {
+		t.Fatalf("terminal.open without a project failed: %+v", opened.Error)
+	}
 	for _, extra := range []string{"cwd", "dir", "path", "shell", "env"} {
 		wantError(t, tc.call("terminal.open", map[string]any{"project_id": "proj-a", extra: "/"}), "bad_request")
 	}

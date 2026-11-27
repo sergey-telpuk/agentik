@@ -29,18 +29,18 @@ function button(label: string): HTMLButtonElement {
   return found;
 }
 
-async function type(value: string): Promise<void> {
-  const input = container.querySelector("input");
-  if (input === null) throw new Error("no input");
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-}
-
 async function show(api: Partial<AgentikApi>, projects: Project[]): Promise<void> {
   const full = {
     listProjects: () => Promise.resolve({ ok: true as const, value: projects }),
+    browse: () =>
+      Promise.resolve({
+        ok: true as const,
+        value: {
+          path: "/Users/me",
+          parent: "/Users",
+          directories: [{ name: "my-app", path: "/Users/me/my-app" }],
+        },
+      }),
     ...api,
   } as unknown as AgentikApi;
   await act(async () => {
@@ -52,7 +52,7 @@ async function show(api: Partial<AgentikApi>, projects: Project[]): Promise<void
 }
 
 describe("FoldersScreen", () => {
-  it("adds a folder by path and shows it", async () => {
+  it("adds a folder picked from the computer, without anyone typing a path", async () => {
     const added = vi.fn(() => Promise.resolve({ ok: true as const, value: { id: "p1", name: "my-app", activeTasks: 0 } }));
     let projects: Project[] = [];
     await show(
@@ -64,23 +64,35 @@ describe("FoldersScreen", () => {
     );
 
     expect(container.textContent).toContain("No folders yet.");
-    await type("/Users/me/Projects/my-app");
-    projects = [{ id: "p1", name: "my-app", activeTasks: 0 }];
     await act(async () => {
-      button("Add folder").click();
+      button("Add a folder").click();
     });
     await act(async () => {
       await Promise.resolve();
     });
 
-    expect(added).toHaveBeenCalledWith("comp-1", "/Users/me/Projects/my-app");
+    // The computer offers what it has; nobody has to know the path.
     expect(container.textContent).toContain("my-app");
+    projects = [{ id: "p1", name: "my-app", activeTasks: 0 }];
+    await act(async () => {
+      button("Add").click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(added).toHaveBeenCalledWith("comp-1", "/Users/me/my-app");
   });
 
   it("says what adding a folder grants", async () => {
     await show({}, []);
-    // The path becomes an agent's working directory; that is worth stating.
-    expect(container.textContent).toContain("runs with your permissions on that computer");
+    await act(async () => {
+      button("Add a folder").click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The folder becomes an agent's working directory; that is worth stating.
+    expect(container.textContent).toContain("runs with your permissions");
   });
 
   it("reports why the computer refused a folder", async () => {
@@ -91,9 +103,14 @@ describe("FoldersScreen", () => {
       },
       [],
     );
-    await type("/nope");
     await act(async () => {
-      button("Add folder").click();
+      button("Add a folder").click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      button("Add").click();
     });
     await act(async () => {
       await Promise.resolve();

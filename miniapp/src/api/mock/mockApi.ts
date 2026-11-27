@@ -637,6 +637,23 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
       };
     },
 
+    async browse(computerId, path) {
+      const record = await session(computerId);
+      if (!record.ok) return record;
+      const home = "/Users/demo";
+      const tree: Record<string, string[]> = {
+        [home]: ["Projects", "Documents", "Downloads"],
+        [`${home}/Projects`]: ["billing-service", "web-app", "infra"],
+      };
+      const at = path === undefined || path === "" ? home : path;
+      const names = tree[at] ?? [];
+      return ok({
+        path: at,
+        parent: at === "/" ? "" : at.slice(0, at.lastIndexOf("/")) || "/",
+        directories: names.map((name) => ({ name, path: `${at}/${name}` })),
+      });
+    },
+
     async addProject(computerId, path, name) {
       const record = await session(computerId);
       if (!record.ok) return record;

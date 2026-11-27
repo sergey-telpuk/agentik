@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -45,8 +46,10 @@ const (
 
 	// session.list is bounded the same way.
 	maxSessionListEntries = 50
-	maxSessionListBytes   = 24 * 1024
-	maxSessionTitleBytes  = 200
+	// maxBrowseEntries keeps one directory listing inside a relay frame.
+	maxBrowseEntries     = 200
+	maxSessionListBytes  = 24 * 1024
+	maxSessionTitleBytes = 200
 )
 
 // EventSink pushes asynchronous inner JSON events (such as session.event or
@@ -381,6 +384,8 @@ func (s *Service) HandleMessage(ctx context.Context, sess *secure.ManagedSession
 	switch req.Method {
 	case "project.list":
 		s.handleProjectList(ctx, sess, req)
+	case "fs.list":
+		s.handleBrowse(ctx, sess, req)
 	case "project.add":
 		s.handleProjectAdd(ctx, sess, req)
 	case "project.remove":
@@ -560,6 +565,77 @@ func (s *Service) handleProjectList(ctx context.Context, sess *secure.ManagedSes
 		})
 	}
 	s.sendResult(ctx, sess, req.RequestID, map[string]any{"projects": out})
+}
+
+// handleBrowse lists directories on this computer so the phone can offer them
+// instead of asking for a path nobody can be expected to type from memory.
+//
+// Only directory names are returned, never file contents, and hidden entries
+// are left out: the point is to find a project, not to browse the machine.
+func (s *Service) handleBrowse(ctx context.Context, sess *secure.ManagedSession, req InboundRequest) {
+	var params struct {
+		Path string `json:"path"`
+	}
+	if len(bytes.TrimSpace(req.Params)) > 0 {
+		if err := decodeStrictParams(req.Params, &params); err != nil {
+			s.sendError(ctx, sess, req.RequestID, "bad_request", err.Error())
+			return
+		}
+	}
+
+	dir := strings.TrimSpace(params.Path)
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			s.sendError(ctx, sess, req.RequestID, "internal", "cannot find the home directory")
+			return
+		}
+		dir = home
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		s.sendError(ctx, sess, req.RequestID, "bad_request", "not a usable path")
+		return
+	}
+
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		s.sendError(ctx, sess, req.RequestID, "not_found", "cannot read that directory")
+		return
+	}
+
+	dirs := make([]BrowseEntry, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if len(dirs) >= maxBrowseEntries {
+			break
+		}
+		dirs = append(dirs, BrowseEntry{Name: e.Name(), Path: filepath.Join(abs, e.Name())})
+	}
+
+	parent := filepath.Dir(abs)
+	if parent == abs {
+		parent = ""
+	}
+	s.sendResult(ctx, sess, req.RequestID, BrowseResult{Path: abs, Parent: parent, Directories: dirs})
+}
+
+// BrowseEntry is one directory offered for selection.
+type BrowseEntry struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// BrowseResult is the result of fs.list.
+type BrowseResult struct {
+	// Path is the directory that was listed, absolute.
+	Path string `json:"path"`
+	// Parent is the directory above it, or empty at the filesystem root.
+	Parent string `json:"parent"`
+	// Directories are the subdirectories, bounded to fit one frame.
+	Directories []BrowseEntry `json:"directories"`
 }
 
 // handleProjectAdd permits a directory on this computer.

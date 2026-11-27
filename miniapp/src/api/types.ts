@@ -213,6 +213,19 @@ export interface TaskResult {
 /** Upper bound on a task description, checked on both sides. */
 export const MAX_PROMPT_LENGTH = 4000;
 
+export interface FolderEntry {
+  readonly name: string;
+  readonly path: string;
+}
+
+export interface FolderListing {
+  /** The directory that was listed. */
+  readonly path: string;
+  /** The directory above it, or empty at the filesystem root. */
+  readonly parent: string;
+  readonly directories: readonly FolderEntry[];
+}
+
 export interface StartTaskInput {
   readonly projectId: string;
   readonly agent: AgentId;
@@ -360,6 +373,11 @@ export interface AgentikApi {
    */
   connect(computerId: string, onState: (state: ConnectionState) => void): Unsubscribe;
   listProjects(computerId: string): Promise<ApiResult<Project[]>>;
+  /**
+   * Lists directories on the computer, starting at the home directory, so a
+   * folder is chosen rather than typed. Only directory names are returned.
+   */
+  browse(computerId: string, path?: string): Promise<ApiResult<FolderListing>>;
   /**
    * Permits a directory on the computer. The path is resolved there: a
    * missing directory, or one that is not a directory, is refused.

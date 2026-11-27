@@ -17,6 +17,7 @@ import {
   type ServerEvent,
   type SessionListResult,
   type SessionOpenParams,
+  type BrowseResult,
   type ProjectAddResult,
   type SessionDeleteResult,
   type SessionOpenResult,
@@ -159,6 +160,11 @@ export class AgentikRpcClient {
 
   listSessions(projectId?: string, options: { readonly timeoutMs?: number } = {}): Promise<SessionListResult> {
     return this.request("session.list", projectId === undefined ? {} : { project_id: projectId }, options);
+  }
+
+  /** Lists directories on the computer, so a path need not be typed. */
+  browse(path?: string): Promise<BrowseResult> {
+    return this.request("fs.list", path === undefined || path === "" ? {} : { path });
   }
 
   /** Permits a directory on the computer. The path is resolved there. */

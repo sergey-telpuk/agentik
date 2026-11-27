@@ -20,6 +20,35 @@ type RelayTURN struct {
 	mu      sync.RWMutex
 	servers []ICEServer
 	expires time.Time
+	ready   chan struct{}
+}
+
+// Wait blocks until credentials have arrived, the context ends, or the grace
+// period passes.
+//
+// A phone that attaches while the daemon is still registering would otherwise
+// be handed a list with no relayed candidate in it, and fail to connect on a
+// network that needs one. Waiting a moment is better than that; giving up
+// after the grace period is better than hanging.
+func (r *RelayTURN) Wait(ctx context.Context, grace time.Duration) {
+	r.mu.Lock()
+	if len(r.servers) > 0 {
+		r.mu.Unlock()
+		return
+	}
+	if r.ready == nil {
+		r.ready = make(chan struct{})
+	}
+	ready := r.ready
+	r.mu.Unlock()
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-ready:
+	case <-timer.C:
+	case <-ctx.Done():
+	}
 }
 
 // ErrNoRelayCredentials is returned before the relay has answered, or once
@@ -39,6 +68,10 @@ func (r *RelayTURN) Store(servers []ICEServer, ttl time.Duration) {
 	defer r.mu.Unlock()
 	r.servers = append([]ICEServer(nil), servers...)
 	r.expires = r.now().Add(ttl)
+	if r.ready != nil {
+		close(r.ready)
+		r.ready = nil
+	}
 }
 
 // Servers returns the stored list while it is still valid.

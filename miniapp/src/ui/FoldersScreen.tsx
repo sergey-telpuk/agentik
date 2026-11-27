@@ -9,8 +9,8 @@
  * Everything from the computer is untrusted and shown as plain text.
  */
 
-import { useEffect, useId, useState } from "react";
-import type { AgentikApi, Project } from "../api/types";
+import { useEffect, useState } from "react";
+import type { AgentikApi, FolderListing, Project } from "../api/types";
 import { sentence } from "./format";
 import { ConfirmDialog, Empty, Notice, Page, SkeletonList, useBusy } from "./kit";
 
@@ -28,13 +28,12 @@ type State =
 
 export function FoldersScreen({ api, computerId, computerName, onBack }: Props) {
   const [state, setState] = useState<State>({ kind: "loading" });
-  const [path, setPath] = useState("");
+  const [picking, setPicking] = useState<FolderListing | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingRemove, setPendingRemove] = useState<Project | null>(null);
   const [adding, runAdd] = useBusy();
   const [removing, runRemove] = useBusy();
   const [reload, setReload] = useState(0);
-  const pathId = useId();
 
   useEffect(() => {
     let cancelled = false;
@@ -51,15 +50,23 @@ export function FoldersScreen({ api, computerId, computerName, onBack }: Props) 
     };
   }, [api, computerId, reload]);
 
-  const trimmed = path.trim();
-
-  async function add(): Promise<void> {
-    const result = await api.addProject(computerId, trimmed);
+  async function openPicker(at?: string): Promise<void> {
+    const result = await api.browse(computerId, at);
     if (!result.ok) {
       setError(sentence(result.error.message));
       return;
     }
-    setPath("");
+    setError(null);
+    setPicking(result.value);
+  }
+
+  async function add(path: string): Promise<void> {
+    const result = await api.addProject(computerId, path);
+    if (!result.ok) {
+      setError(sentence(result.error.message));
+      return;
+    }
+    setPicking(null);
     setError(null);
     setReload((n) => n + 1);
   }
@@ -80,39 +87,51 @@ export function FoldersScreen({ api, computerId, computerName, onBack }: Props) 
 
   return (
     <Page title="Folders" subtitle={computerName} onBack={onBack}>
-      <form
-        className="form"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (trimmed !== "" && !adding) void runAdd(add);
-        }}
-      >
-        <div className="field">
-          <label htmlFor={pathId}>Add a folder</label>
-          <input
-            id={pathId}
-            className="input"
-            type="text"
-            value={path}
-            onChange={(e) => {
-              setPath(e.target.value);
-              setError(null);
-            }}
-            placeholder="/Users/you/Projects/my-app"
-            autoCapitalize="off"
-            autoCorrect="off"
-            spellCheck={false}
-            disabled={adding}
-          />
-          <p className="hint">
-            The full path on {computerName}. An agent you start here runs with your permissions on that computer and
-            can change anything in the folder.
-          </p>
-        </div>
-        <button type="submit" className="button button-primary button-block" disabled={trimmed === "" || adding} aria-busy={adding}>
-          {adding ? "Adding…" : "Add folder"}
+      {picking === null ? (
+        <button type="button" className="button button-primary button-block" onClick={() => void openPicker()}>
+          Add a folder
         </button>
-      </form>
+      ) : (
+        <section className="section">
+          <div className="section-head">
+            <h3>{picking.path}</h3>
+            {picking.parent !== "" && (
+              <button type="button" className="button button-secondary" onClick={() => void openPicker(picking.parent)}>
+                Up
+              </button>
+            )}
+          </div>
+          {picking.directories.length === 0 && <p className="hint">No folders here.</p>}
+          <ul className="chat-list">
+            {picking.directories.map((d) => (
+              <li key={d.path} className="chat-item">
+                <button type="button" className="chat-open" onClick={() => void openPicker(d.path)}>
+                  <span className="chat-title">{d.name}</span>
+                </button>
+                <button
+                  type="button"
+                  className="button button-secondary"
+                  disabled={adding}
+                  onClick={() => void runAdd(() => add(d.path))}
+                >
+                  Add
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="button-row">
+            <button type="button" className="button button-primary" disabled={adding} onClick={() => void runAdd(() => add(picking.path))}>
+              {adding ? "Adding…" : "Add this folder"}
+            </button>
+            <button type="button" className="button button-secondary" onClick={() => setPicking(null)}>
+              Cancel
+            </button>
+          </div>
+          <p className="hint">
+            An agent you start here runs with your permissions on {computerName} and can change anything in the folder.
+          </p>
+        </section>
+      )}
 
       {error !== null && (
         <Notice tone="bad" alert title="Could not do that">

@@ -35,6 +35,7 @@ import { isFinalState } from "../taskState";
 import {
   MAX_PROMPT_LENGTH,
   type AgentikApi,
+  type FolderListing,
   type Project,
   type ApiErrorCode,
   type ApiResult,
@@ -350,6 +351,17 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
         attempt.close();
         if (attempts.get(computerId) === attempt) attempts.delete(computerId);
       };
+    },
+
+    async browse(computerId, path) {
+      return call(computerId, async (rpc): Promise<FolderListing> => {
+        const listed = await rpc.browse(path);
+        return {
+          path: listed.path,
+          parent: listed.parent,
+          directories: listed.directories.map((d) => ({ name: d.name, path: d.path })),
+        };
+      });
     },
 
     async addProject(computerId, path, name) {

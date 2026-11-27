@@ -258,6 +258,10 @@ func (a *Acceptor) HandlePeerState(ctx context.Context, connectionID string, pre
 	a.sendICEServers(ctx, p)
 }
 
+// turnWaitGrace bounds how long a phone waits for TURN credentials that are
+// still in flight. Past it the direct path and STUN are offered on their own.
+const turnWaitGrace = 3 * time.Second
+
 // TURNProvider supplies ICE servers with ready-made credentials.
 type TURNProvider interface {
 	Servers(ctx context.Context) ([]ICEServer, error)
@@ -268,6 +272,13 @@ type TURNProvider interface {
 func (a *Acceptor) iceServers(ctx context.Context, p *peer) []ICEServer {
 	if a.cfg.TURNProvider == nil {
 		return a.cfg.ICE.Servers("agentik")
+	}
+	// A phone can attach before the relay has answered, so give the
+	// credentials a moment rather than sending a list it cannot use.
+	if waiter, ok := a.cfg.TURNProvider.(interface {
+		Wait(context.Context, time.Duration)
+	}); ok {
+		waiter.Wait(ctx, turnWaitGrace)
 	}
 	fetched, err := a.cfg.TURNProvider.Servers(ctx)
 	if err != nil {

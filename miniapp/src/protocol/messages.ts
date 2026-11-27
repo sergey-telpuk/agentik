@@ -146,6 +146,17 @@ export interface SessionListResult {
   readonly sessions_truncated?: boolean;
 }
 
+export interface BrowseEntry {
+  readonly name: string;
+  readonly path: string;
+}
+
+export interface BrowseResult {
+  readonly path: string;
+  readonly parent: string;
+  readonly directories: readonly BrowseEntry[];
+}
+
 export interface ProjectAddResult {
   readonly project_id: string;
   readonly name: string;

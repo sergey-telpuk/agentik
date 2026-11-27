@@ -66,23 +66,34 @@ func (s *Service) handleTerminalOpen(ctx context.Context, sess *secure.ManagedSe
 		s.sendError(ctx, sess, req.RequestID, "bad_request", err.Error())
 		return
 	}
-	if strings.TrimSpace(params.ProjectID) == "" {
-		s.sendError(ctx, sess, req.RequestID, "bad_request", "project_id is required")
-		return
+	// Without a project the shell opens in the home directory. A terminal is
+	// how someone looks around before deciding what a project even is, so
+	// requiring one first put the two in the wrong order. The working
+	// directory is still never a path from the network: it is either a
+	// permitted project root or this user's own home.
+	projectID := strings.TrimSpace(params.ProjectID)
+	root := ""
+	if projectID == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			s.sendError(ctx, sess, req.RequestID, "internal", "cannot find the home directory")
+			return
+		}
+		root = home
+	} else {
+		proj, err := s.projects.Get(projectID)
+		if err != nil {
+			s.sendError(ctx, sess, req.RequestID, "not_found", "project not found")
+			return
+		}
+		if real, err := filepath.EvalSymlinks(proj.Root); err != nil || real != proj.Root {
+			s.sendError(ctx, sess, req.RequestID, "not_found", "project directory is no longer available")
+			return
+		}
+		root = proj.Root
 	}
-	// The working directory is always a permitted project root, never a
-	// path from the network.
-	proj, err := s.projects.Get(params.ProjectID)
-	if err != nil {
-		s.sendError(ctx, sess, req.RequestID, "not_found", "project not found")
-		return
-	}
-	if real, err := filepath.EvalSymlinks(proj.Root); err != nil || real != proj.Root {
-		s.sendError(ctx, sess, req.RequestID, "not_found", "project directory is no longer available")
-		return
-	}
-	if info, err := os.Stat(proj.Root); err != nil || !info.IsDir() {
-		s.sendError(ctx, sess, req.RequestID, "not_found", "project directory is no longer available")
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		s.sendError(ctx, sess, req.RequestID, "not_found", "that directory is no longer available")
 		return
 	}
 
@@ -95,8 +106,8 @@ func (s *Service) handleTerminalOpen(ctx context.Context, sess *secure.ManagedSe
 	}
 	info, err := s.terminals.Open(terminal.OpenRequest{
 		Owner:     terminalOwner(sess),
-		ProjectID: proj.ID,
-		Dir:       proj.Root,
+		ProjectID: projectID,
+		Dir:       root,
 		Command:   params.Command,
 		Cols:      cols,
 		Rows:      rows,

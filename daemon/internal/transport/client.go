@@ -321,10 +321,10 @@ func (c *Client) runOnce(ctx context.Context, generation uint64) runOutcome {
 		State:   StateConnected,
 		RelayID: challenge.RelayID,
 	})
-	if c.cfg.Handlers.OnRegistered != nil {
-		c.cfg.Handlers.OnRegistered(registeredMsg.DeviceID, append([]string(nil), registeredMsg.Connections...))
-	}
-
+	// Ask for TURN credentials before announcing the registration: the
+	// clients already attached are handed an ICE server list as soon as they
+	// are known, and a list sent before the credentials arrive has no relayed
+	// candidate in it.
 	// Ask for TURN credentials now that the socket is a registered device:
 	// that registration signature is what entitles it to them. The answer
 	// arrives on the read loop below, and a relay without a TURN key simply
@@ -333,6 +333,10 @@ func (c *Client) runOnce(ctx context.Context, generation uint64) runOutcome {
 		// Best effort: a relay that cannot answer leaves direct paths and
 		// STUN to do the work, which is not a reason to drop the session.
 		_ = conn.writeText(ctx, []byte(`{"type":"turn"}`))
+	}
+
+	if c.cfg.Handlers.OnRegistered != nil {
+		c.cfg.Handlers.OnRegistered(registeredMsg.DeviceID, append([]string(nil), registeredMsg.Connections...))
 	}
 
 	// Start keepalive loop and run read loop until disconnect/cancel.
