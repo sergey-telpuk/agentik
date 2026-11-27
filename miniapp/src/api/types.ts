@@ -138,6 +138,8 @@ export interface TaskSummary {
   readonly sessionId: string;
   readonly agent: AgentId;
   readonly prompt: string;
+  /** The model this turn ran with. Empty or absent means the agent's own default. */
+  readonly model?: string;
   readonly state: TaskState;
   readonly createdAt: number;
   readonly updatedAt: number;

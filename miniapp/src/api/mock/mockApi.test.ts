@@ -240,6 +240,32 @@ describe("tasks", () => {
     });
   });
 
+  it("continues a conversation with a chosen model, validates it, and reports the model of each turn", async () => {
+    const { api } = await setup("happy");
+    await connect(api, MAIN);
+    const first = value(await start(api, "proj_billing", "Look at the invoice rounding"));
+    await vi.advanceTimersByTimeAsync(30_000);
+    const follow = { projectId: "proj_billing", agent: "codex", sessionId: first.sessionId };
+
+    // An unknown model is rejected and does not start a turn.
+    expect(
+      await api.startTask(MAIN, { ...follow, prompt: "Which rounding?", model: "nope", requestId: "f-bad" }),
+    ).toMatchObject({ ok: false, error: { code: "invalid" } });
+    expect(value(await api.getSession(MAIN, "proj_billing", first.sessionId)).turns).toHaveLength(1);
+
+    const small = value(
+      await api.startTask(MAIN, { ...follow, prompt: "Which rounding?", model: "mock-small", requestId: "f-small" }),
+    );
+    expect(small.model).toBe("mock-small");
+    await vi.advanceTimersByTimeAsync(30_000);
+    const plain = value(await api.startTask(MAIN, { ...follow, prompt: "And the tax?", requestId: "f-plain" }));
+    expect(plain.model).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const turns = value(await api.getSession(MAIN, "proj_billing", first.sessionId)).turns;
+    expect(turns.map((t) => t.model)).toEqual([undefined, "mock-small", undefined]);
+  });
+
   it("reports busy while another task is active in the same project", async () => {
     const { api } = await setup("happy");
     await connect(api, MAIN);

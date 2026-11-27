@@ -104,6 +104,7 @@ class MockTask {
   readonly sessionId: string;
   readonly agent: AgentId;
   readonly prompt: string;
+  readonly model: string;
   readonly createdAt: number;
   state: TaskState = "accepted";
   updatedAt: number;
@@ -125,7 +126,7 @@ class MockTask {
   readonly #ids: IdSource;
 
   constructor(
-    init: { projectId: string; agent: AgentId; prompt: string; createdAt: number; sessionId?: string },
+    init: { projectId: string; agent: AgentId; prompt: string; createdAt: number; sessionId?: string; model?: string },
     steps: readonly Step[],
     now: () => number,
     ids: IdSource,
@@ -135,6 +136,7 @@ class MockTask {
     this.projectId = init.projectId;
     this.agent = init.agent;
     this.prompt = init.prompt;
+    this.model = init.model ?? "";
     this.createdAt = init.createdAt;
     this.updatedAt = init.createdAt;
     this.#queue = [...steps];
@@ -156,6 +158,7 @@ class MockTask {
       sessionId: this.sessionId,
       agent: this.agent,
       prompt: this.prompt,
+      ...(this.model === "" ? {} : { model: this.model }),
       state: this.state,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
@@ -730,6 +733,7 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
           agent: input.agent,
           prompt,
           createdAt: now(),
+          ...(model === "" ? {} : { model }),
           ...(sessionId === null ? {} : { sessionId }),
         },
         sessionId === null ? data.newTaskSteps(project.name, input.agent) : data.followUpSteps(project.name, input.agent),

@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { MAX_PROMPT_LENGTH, type Agent, type AgentikApi, type AgentId, type TaskSummary } from "../api/types";
 import { sentence } from "./format";
 import { Notice, Page, SkeletonList, useBusy } from "./kit";
+import { ModelSelect, knownModel } from "./ModelSelect";
 
 interface Props {
   readonly api: AgentikApi;
@@ -59,9 +60,8 @@ export function NewTaskScreen({
 
   const selected = agents?.find((a) => a.id === agent);
   const models = selected?.status === "available" ? (selected.models ?? []) : [];
-  const defaultModel = models.find((m) => m.isDefault);
   // A model from another agent's list (or one that vanished) is never sent.
-  const chosenModel = models.some((m) => m.id === model) ? model : "";
+  const chosenModel = knownModel(models, model);
   const trimmed = prompt.trim();
   const tooLong = trimmed.length > MAX_PROMPT_LENGTH;
   const canSubmit = trimmed !== "" && !tooLong && selected?.status === "available" && !busy;
@@ -153,20 +153,14 @@ export function NewTaskScreen({
         {selected?.status === "available" && (
           <div className="field">
             <label htmlFor={modelId}>Model</label>
-            <select
+            <ModelSelect
               id={modelId}
+              models={models}
               value={chosenModel}
-              onChange={(e) => setModel(e.target.value)}
+              onChange={setModel}
               disabled={busy || models.length === 0}
-              aria-describedby={modelHintId}
-            >
-              <option value="">{defaultModel === undefined ? "Default model" : `Default (${defaultModel.name})`}</option>
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
+              ariaDescribedBy={modelHintId}
+            />
             <p id={modelHintId} className="hint">
               {models.length === 0
                 ? (selected.modelsNote ?? `${selected.name} offers no model choice here; it uses its own default model.`)
