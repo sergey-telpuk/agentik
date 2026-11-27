@@ -701,6 +701,31 @@ p {
   color: var(--hint);
 }
 
+.get-started {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  color: var(--text);
+}
+
+.download-links {
+  display: flex;
+  flex-direction: column;
+}
+
+.download-link {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.get-started code {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
 .skeleton-list {
   display: flex;
   flex-direction: column;

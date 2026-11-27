@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentik daemon downloads</title>
+<style>
+  body { font: 16px/1.5 -apple-system, system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+  code, pre { font-family: ui-monospace, Menlo, monospace; }
+  pre { background: #f2f2f2; padding: .75rem; overflow-x: auto; }
+  @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } pre { background: #222; } a { color: #8ab4ff; } }
+</style>
+</head>
+<body>
+<h1>Agentik daemon for macOS</h1>
+<p>Version: <code>@VERSION@</code></p>
+<ul>
+  <li><a href="agentik-darwin-arm64">agentik-darwin-arm64</a> - Apple Silicon (M1 and later)</li>
+  <li><a href="agentik-darwin-amd64">agentik-darwin-amd64</a> - Intel</li>
+  <li><a href="SHA256SUMS">SHA256SUMS</a> - checksums</li>
+  <li><a href="README.txt">README.txt</a> - how to verify and run</li>
+</ul>
+<p>Run <code>uname -m</code> to check: <code>arm64</code> is Apple Silicon, <code>x86_64</code> is Intel.
+Downloading with curl avoids the macOS quarantine prompt:</p>
+<pre>curl -fLO https://sergey-telpuk.github.io/agentik/downloads/agentik-darwin-arm64
+chmod +x agentik-darwin-arm64
+./agentik-darwin-arm64 -pair</pre>
+</body>
+</html>

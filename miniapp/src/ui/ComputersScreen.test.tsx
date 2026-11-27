@@ -107,3 +107,55 @@ describe("ComputersScreen row", () => {
     }
   });
 });
+
+describe("ComputersScreen empty state", () => {
+  const BASE = import.meta.env.BASE_URL;
+
+  function block(): Element | null {
+    return container.querySelector(".get-started");
+  }
+
+  it("shows the get-started block when no computer is paired", async () => {
+    await show([]);
+    expect(container.textContent).toContain("No computers paired yet.");
+    expect(block()).not.toBeNull();
+  });
+
+  it("has the three sections in order", async () => {
+    await show([]);
+    const titles = [...(block()?.querySelectorAll("section h3") ?? [])].map((h) => h.textContent);
+    expect(titles).toEqual(["What to download", "How it works", "How secure it is"]);
+    const steps = [...(block()?.querySelectorAll("ol.steps li") ?? [])].map((li) => li.textContent);
+    expect(steps).toEqual([
+      "Download the file for your Mac and check the checksum.",
+      "In Terminal on your Mac, run the daemon with -pair.",
+      "Paste the invitation or scan the QR code here.",
+      "Confirm the pairing with “y” in Terminal on your Mac.",
+    ]);
+    expect(block()?.querySelectorAll("ul.bullets li")).toHaveLength(5);
+    const text = block()?.textContent ?? "";
+    expect(text).toContain("end to end (Noise protocol)");
+    expect(text).toContain("does not accept incoming connections");
+    expect(text).toContain("not signed by Apple yet");
+  });
+
+  it("links to the files under BASE_URL", async () => {
+    await show([]);
+    const links = [...(block()?.querySelectorAll("a") ?? [])].map((a) => [a.textContent, a.getAttribute("href")]);
+    expect(links).toEqual([
+      ["Apple Silicon (arm64)", `${BASE}downloads/agentik-darwin-arm64`],
+      ["Intel (amd64)", `${BASE}downloads/agentik-darwin-amd64`],
+      ["Checksums (SHA256SUMS)", `${BASE}downloads/SHA256SUMS`],
+      ["All files and instructions", `${BASE}downloads/`],
+    ]);
+    for (const a of block()?.querySelectorAll("a") ?? []) {
+      expect(a.getAttribute("rel")).toBe("noopener noreferrer");
+    }
+  });
+
+  it("is not shown when a computer is listed", async () => {
+    await show([computer("online", 1)]);
+    expect(block()).toBeNull();
+    expect(container.textContent).not.toContain("What to download");
+  });
+});

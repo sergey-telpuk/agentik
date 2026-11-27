@@ -3,7 +3,7 @@ import type { AgentikApi, Computer } from "../api/types";
 import agentikIcon from "../assets/agentik-icon.svg";
 import type { PersistenceState } from "../storage/pinnedDevices";
 import { sentence, shortId } from "./format";
-import { Empty, Notice, Page, SettingsButton, SkeletonList } from "./kit";
+import { Empty, Notice, Page, Section, SettingsButton, SkeletonList } from "./kit";
 
 interface Props {
   readonly api: AgentikApi;
@@ -17,6 +17,65 @@ type Listing =
   | { readonly kind: "loading" }
   | { readonly kind: "ready"; readonly computers: Computer[] }
   | { readonly kind: "error"; readonly message: string };
+
+const DOWNLOADS_BASE = `${import.meta.env.BASE_URL}downloads/`;
+
+const DOWNLOAD_LINKS: readonly { readonly label: string; readonly href: string }[] = [
+  { label: "Apple Silicon (arm64)", href: `${DOWNLOADS_BASE}agentik-darwin-arm64` },
+  { label: "Intel (amd64)", href: `${DOWNLOADS_BASE}agentik-darwin-amd64` },
+  { label: "Checksums (SHA256SUMS)", href: `${DOWNLOADS_BASE}SHA256SUMS` },
+  { label: "All files and instructions", href: DOWNLOADS_BASE },
+];
+
+/** Shown only in the empty state: what to download, how pairing works, and what protects the link. */
+function GetStarted() {
+  return (
+    <div className="get-started">
+      <Section title="What to download">
+        <ul className="plain-list download-links">
+          {DOWNLOAD_LINKS.map((l) => (
+            <li key={l.href}>
+              <a className="download-link" href={l.href} target="_blank" rel="noopener noreferrer">
+                {l.label}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </Section>
+      <Section title="How it works">
+        <ol className="steps">
+          <li>Download the file for your Mac and check the checksum.</li>
+          <li>
+            In Terminal on your Mac, run the daemon with <code>-pair</code>.
+          </li>
+          <li>Paste the invitation or scan the QR code here.</li>
+          <li>Confirm the pairing with “y” in Terminal on your Mac.</li>
+        </ol>
+      </Section>
+      <Section title="How secure it is">
+        <ul className="bullets">
+          <li>
+            Pairing needs a one-time invitation and your confirmation on your Mac. A phone that was never paired cannot
+            connect.
+          </li>
+          <li>
+            Messages between your phone and your Mac are encrypted end to end (Noise protocol). The relay forwards
+            encrypted bytes and cannot read them.
+          </li>
+          <li>Your Mac does not accept incoming connections. The daemon connects outwards.</li>
+          <li>
+            The files are built from the public source by GitHub Actions. Check the SHA256 checksum before you run a
+            file.
+          </li>
+          <li>
+            The files are not signed by Apple yet. macOS may ask you to confirm the first run if you download in a
+            browser.
+          </li>
+        </ul>
+      </Section>
+    </div>
+  );
+}
 
 export function ComputersScreen({ api, persistence, onAdd, onOpen, onSettings }: Props) {
   const [listing, setListing] = useState<Listing>({ kind: "loading" });
@@ -65,11 +124,7 @@ export function ComputersScreen({ api, persistence, onAdd, onOpen, onSettings }:
       )}
       {listing.kind === "ready" && listing.computers.length === 0 && (
         <Empty title="No computers paired yet.">
-          <ol className="steps">
-            <li>Install and start Agentik on your computer.</li>
-            <li>It shows a pairing QR code.</li>
-            <li>Tap “Connect a computer” below and scan it.</li>
-          </ol>
+          <GetStarted />
         </Empty>
       )}
       {listing.kind === "ready" && listing.computers.length > 0 && (
