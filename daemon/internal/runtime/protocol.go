@@ -111,6 +111,12 @@ type SessionSummary struct {
 	ThreadID  string `json:"thread_id,omitempty"`
 	CreatedAt int64  `json:"created_at"`
 	UpdatedAt int64  `json:"updated_at"`
+	// Title is the first prompt of the session, bounded in length.
+	Title string `json:"title,omitempty"`
+	// LatestState is the state of the newest turn.
+	LatestState TaskState `json:"latest_state,omitempty"`
+	// TurnCount is the number of turns (tasks) in the session.
+	TurnCount int `json:"turn_count"`
 }
 
 // SessionEventView represents one ordered event in a session.

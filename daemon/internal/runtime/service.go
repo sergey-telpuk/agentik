@@ -40,6 +40,11 @@ const (
 	maxSessionTurns         = 50
 	maxSessionTurnsBytes    = 24 * 1024
 	maxSessionTurnTextBytes = 6 * 1024
+
+	// session.list is bounded the same way.
+	maxSessionListEntries = 50
+	maxSessionListBytes   = 24 * 1024
+	maxSessionTitleBytes  = 200
 )
 
 // EventSink pushes asynchronous inner JSON events (such as session.event or
@@ -553,9 +558,16 @@ func (s *Service) handleSessionList(ctx context.Context, sess *secure.ManagedSes
 		}
 	}
 
+	// Sessions without any turn (for example one created by session.open and
+	// never used) have no title and are not listed. The newest activity comes
+	// first; one extra row is read to detect truncation.
 	query := `SELECT s.id, s.project_id, s.adapter, COALESCE(s.agent_thread_id, ''), s.created_at,
-	          COALESCE((SELECT MAX(t.updated_at) FROM tasks t WHERE t.session_id = s.id), s.created_at)
-	          FROM agent_sessions s WHERE s.closed_at IS NULL`
+	          (SELECT MAX(t.updated_at) FROM tasks t WHERE t.session_id = s.id),
+	          (SELECT t.prompt FROM tasks t WHERE t.session_id = s.id ORDER BY t.created_at ASC, t.rowid ASC LIMIT 1),
+	          (SELECT t.state FROM tasks t WHERE t.session_id = s.id ORDER BY t.created_at DESC, t.rowid DESC LIMIT 1),
+	          (SELECT COUNT(*) FROM tasks t WHERE t.session_id = s.id)
+	          FROM agent_sessions s
+	          WHERE s.closed_at IS NULL AND EXISTS (SELECT 1 FROM tasks t WHERE t.session_id = s.id)`
 	var args []any
 	if params.ProjectID != "" {
 		if _, err := s.projects.Get(params.ProjectID); err != nil {
@@ -565,7 +577,8 @@ func (s *Service) handleSessionList(ctx context.Context, sess *secure.ManagedSes
 		query += ` AND s.project_id = ?`
 		args = append(args, params.ProjectID)
 	}
-	query += ` ORDER BY s.created_at DESC LIMIT 50`
+	query += ` ORDER BY 6 DESC, s.created_at DESC, s.rowid DESC LIMIT ?`
+	args = append(args, maxSessionListEntries+1)
 
 	rows, err := s.db.SQL().QueryContext(ctx, query, args...)
 	if err != nil {
@@ -575,15 +588,48 @@ func (s *Service) handleSessionList(ctx context.Context, sess *secure.ManagedSes
 	defer rows.Close()
 
 	sessions := make([]SessionSummary, 0)
+	truncated := false
+	budget := maxSessionListBytes
 	for rows.Next() {
 		var item SessionSummary
-		if err := rows.Scan(&item.SessionID, &item.ProjectID, &item.Agent, &item.ThreadID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		var state string
+		if err := rows.Scan(&item.SessionID, &item.ProjectID, &item.Agent, &item.ThreadID, &item.CreatedAt,
+			&item.UpdatedAt, &item.Title, &state, &item.TurnCount); err != nil {
 			s.sendError(ctx, sess, req.RequestID, "internal", "failed to scan session")
 			return
 		}
+		if len(sessions) >= maxSessionListEntries {
+			truncated = true
+			break
+		}
+		item.Title = truncateUTF8(item.Title, maxSessionTitleBytes)
+		item.LatestState = TaskState(state)
+		raw, err := json.Marshal(item)
+		if err != nil {
+			s.sendError(ctx, sess, req.RequestID, "internal", "failed to encode session")
+			return
+		}
+		if len(raw) > budget {
+			truncated = true
+			break
+		}
+		budget -= len(raw)
 		sessions = append(sessions, item)
 	}
-	s.sendResult(ctx, sess, req.RequestID, map[string]any{"sessions": sessions})
+	if err := rows.Err(); err != nil {
+		s.sendError(ctx, sess, req.RequestID, "internal", "failed to list sessions")
+		return
+	}
+	s.sendResult(ctx, sess, req.RequestID, SessionListResult{Sessions: sessions, SessionsTruncated: truncated})
+}
+
+// SessionListResult is the result of session.list.
+type SessionListResult struct {
+	// Sessions are the most recently active sessions that fit the frame
+	// budget, newest activity first.
+	Sessions []SessionSummary `json:"sessions"`
+	// SessionsTruncated is true when older sessions were left out.
+	SessionsTruncated bool `json:"sessions_truncated,omitempty"`
 }
 
 func (s *Service) handleSessionOpen(ctx context.Context, sess *secure.ManagedSession, req InboundRequest) {
