@@ -284,13 +284,18 @@ func TestRunFirstStartPrintsBannerAndQR(t *testing.T) {
 		t.Fatalf("status line printed while nothing is paired:\n%s", out)
 	}
 	// Logs go to stderr, not between the banner and the QR code.
-	for _, log := range []string{"device id:", "relay:"} {
+	for _, log := range []string{"relay:"} {
 		if strings.Contains(out, log) {
 			t.Errorf("stdout carries log %q:\n%s", log, out)
 		}
 		if !strings.Contains(errOut, log) {
 			t.Errorf("stderr is missing log %q:\n%s", log, errOut)
 		}
+	}
+	// Paths and identifiers belong to -status and to the status display, not
+	// to a startup that should read as "here is how to pair".
+	if strings.Contains(out, "device id:") || strings.Contains(errOut, "device id:") {
+		t.Errorf("startup prints diagnostics that -status is for:\n%s\n%s", out, errOut)
 	}
 }
 
@@ -300,7 +305,7 @@ func TestRunWithPairedPhonePrintsOneLine(t *testing.T) {
 	addPairedPhone(t, dataDir, 2)
 
 	out, _ := runDaemon(t, dataDir, "quit\n")
-	want := "Agentik daemon is running. Paired phones: 2. Stop with Ctrl+C.\n"
+	want := "Agentik daemon is running.\nPaired phones: 2. Press Enter for status, type help for commands, Ctrl+C to stop.\n"
 	if !strings.HasPrefix(out, want) {
 		t.Fatalf("stdout should start with %q:\n%s", want, out)
 	}
@@ -338,8 +343,9 @@ func TestPrintStartup(t *testing.T) {
 
 	b.Reset()
 	printStartup(&b, 1)
-	if got, want := b.String(), "Agentik daemon is running. Paired phones: 1. Stop with Ctrl+C.\n"; got != want {
-		t.Fatalf("paired output = %q, want %q", got, want)
+	want1 := "Agentik daemon is running.\nPaired phones: 1. Press Enter for status, type help for commands, Ctrl+C to stop.\n"
+	if got := b.String(); got != want1 {
+		t.Fatalf("paired output = %q, want %q", got, want1)
 	}
 }
 

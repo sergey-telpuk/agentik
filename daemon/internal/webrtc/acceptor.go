@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -132,6 +133,34 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 		api = pion.NewAPI()
 	}
 	return &Acceptor{cfg: cfg, api: api, peers: make(map[string]*peer)}, nil
+}
+
+// PeerStat describes one connected phone for the status display.
+type PeerStat struct {
+	// ConnectionID is the relay's id for this connection.
+	ConnectionID string
+	// Open is true once the DataChannel carries application data.
+	Open bool
+	// Since is when the connection was accepted.
+	Since time.Time
+}
+
+// Peers reports the current connections, oldest first. It is a snapshot for
+// display: a peer may close while the caller is formatting it.
+func (a *Acceptor) Peers() []PeerStat {
+	a.mu.Lock()
+	peers := make([]*peer, 0, len(a.peers))
+	for _, p := range a.peers {
+		peers = append(peers, p)
+	}
+	a.mu.Unlock()
+
+	stats := make([]PeerStat, 0, len(peers))
+	for _, p := range peers {
+		stats = append(stats, PeerStat{ConnectionID: p.id, Open: p.isOpen(), Since: p.createdAt})
+	}
+	sort.Slice(stats, func(i, j int) bool { return stats[i].Since.Before(stats[j].Since) })
+	return stats
 }
 
 // SetSessions attaches the Noise layer. It must be set before peers arrive.

@@ -8,9 +8,12 @@ import (
 	"rsc.io/qr"
 )
 
-// QRQuietZone is the number of blank modules around the code. Four is the
-// width the QR specification asks for; narrower margins scan unreliably.
-const QRQuietZone = 4
+// QRQuietZone is the number of blank modules around the code. The
+// specification asks for four, which a printed code needs to stand apart from
+// whatever surrounds it. On a terminal the code already sits on its own
+// background, and two modules keep it reliably scannable while saving four
+// columns and two lines.
+const QRQuietZone = 2
 
 // QRLevel is the error correction level of the pairing QR code. Level M
 // survives about 15% damage, which covers a terminal's font rendering and a

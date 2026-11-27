@@ -206,6 +206,28 @@ func (s *Service) Close() {
 	s.wg.Wait()
 }
 
+// Stats is what the console status display shows about the work in progress.
+type Stats struct {
+	// ActiveTurns is how many agent turns are running right now.
+	ActiveTurns int
+	// PendingApprovals is how many operations are waiting for a decision on
+	// the phone.
+	PendingApprovals int
+	// Terminals is how many shell sessions are open.
+	Terminals int
+}
+
+// Stats reports a snapshot of the work in progress.
+func (s *Service) Stats() Stats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return Stats{
+		ActiveTurns:      len(s.activeTurns),
+		PendingApprovals: len(s.approvals),
+		Terminals:        s.terminals.Count(),
+	}
+}
+
 // Reconcile marks any unfinished tasks from a previous process lifetime as
 // recovery_required and expires any lingering pending approvals. Incomplete
 // launches are never auto-retried (AGENTIK.md section 7.2).

@@ -489,6 +489,13 @@ func (m *Manager) ClosePeer(peerKey []byte, reason string) int {
 
 // CloseAll ends every session, refuses new ones, and waits until every
 // session process is gone, including sessions closed earlier without waiting.
+// Count reports how many sessions are open, for the status display.
+func (m *Manager) Count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.sessions)
+}
+
 func (m *Manager) CloseAll(reason string) {
 	m.mu.Lock()
 	m.shutdown = true

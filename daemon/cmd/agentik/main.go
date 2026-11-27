@@ -198,15 +198,23 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	if created {
 		fmt.Fprintln(diag, "Created a new device identity.")
 	}
-	fmt.Fprintf(diag, "device id:     %s\n", id.DeviceIDString())
-	fmt.Fprintf(diag, "data dir:      %s\n", store.Dir())
-	fmt.Fprintf(diag, "database:      %s (schema v%d)\n", db.Path(), schemaVersion)
-	fmt.Fprintf(diag, "projects:      %d\n", cat.Len())
-	fmt.Fprintf(diag, "codex:         available=%v authenticated=%v", codexDiag.Available, codexDiag.Authenticated)
-	if codexDiag.Version != "" {
-		fmt.Fprintf(diag, " version=%q", codexDiag.Version)
+	// Paths and versions answer "is this set up right", which is what -status
+	// is for. A normal run keeps the terminal for what is happening instead;
+	// the status display repeats the identity on demand.
+	if *showStatus {
+		fmt.Fprintf(diag, "device id:     %s\n", id.DeviceIDString())
+		fmt.Fprintf(diag, "data dir:      %s\n", store.Dir())
+		fmt.Fprintf(diag, "database:      %s (schema v%d)\n", db.Path(), schemaVersion)
+		fmt.Fprintf(diag, "projects:      %d\n", cat.Len())
+		fmt.Fprintf(diag, "codex:         available=%v authenticated=%v", codexDiag.Available, codexDiag.Authenticated)
+		if codexDiag.Version != "" {
+			fmt.Fprintf(diag, " version=%q", codexDiag.Version)
+		}
+		fmt.Fprintln(diag)
+	} else if !codexDiag.Available || !codexDiag.Authenticated {
+		// Worth saying unprompted: no agent means no task can start.
+		fmt.Fprintln(diag, "codex: not ready; tasks cannot start until it is installed and signed in")
 	}
-	fmt.Fprintln(diag)
 
 	if *showStatus {
 		fmt.Fprintln(out, "agents:")
@@ -371,7 +379,16 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 			go refreshInvitation(runCtx, pairSvc, normalizedRelay, *pairTTL, inv.ExpiresAt, &outMu, out)
 		}
 	}
-	logf("Commands: pair, clients, revoke <id>, quit")
+	status := statusSource{
+		peers:    acceptor.Peers,
+		stats:    hub.Runtime().Stats,
+		clients:  pairSvc.ListTrustedClients,
+		deviceID: id.DeviceIDString(),
+		relay:    normalizedRelay,
+		started:  time.Now(),
+		version:  version,
+	}
+	logf("Commands: status, pair, clients, revoke <id>, quit")
 
 	var transportWg sync.WaitGroup
 	transportErrCh := make(chan error, 1)
@@ -460,8 +477,14 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 			}
 
 			switch {
-			case cmd == "" || cmd == "help":
-				logLine("Commands: pair, clients, revoke <id>, quit")
+			case cmd == "" || cmd == "status":
+				// An empty line is the quickest way to ask "what is going on",
+				// so it shows the status rather than repeating the help.
+				outMu.Lock()
+				printStatus(out, status, time.Now())
+				outMu.Unlock()
+			case cmd == "help":
+				logLine("Commands: status (or Enter), pair, clients, revoke <id>, quit")
 			case cmd == "quit" || cmd == "exit":
 				logLine("Shutting down.")
 				return nil
@@ -525,7 +548,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 // last one must match the confirmation prompt, which accepts y.
 var welcomeParagraphs = []string{
 	"Agentik runs your AI coding agents on this computer and lets you control them from your phone.",
-	"This program (the daemon) runs on this Mac, starts agents such as Codex in your project folders, " +
+	"This program (the daemon) runs on this computer, starts agents such as Codex in your project folders, " +
 		"and keeps the connection to your phone encrypted. It makes no incoming connections.",
 	"Scan the code below with the Agentik app in Telegram to pair this computer. " +
 		"You confirm the pairing here with y.",
@@ -538,7 +561,10 @@ const terminalWidth = 80
 // single status line once one is.
 func printStartup(out io.Writer, paired int) {
 	if paired > 0 {
-		fmt.Fprintf(out, "Agentik daemon is running. Paired phones: %d. Stop with Ctrl+C.\n", paired)
+		// Already set up: say what it is, what it is doing, and how to look
+		// closer or stop. The full explanation is only useful the first time.
+		fmt.Fprintf(out, "Agentik daemon is running.\n")
+		fmt.Fprintf(out, "Paired phones: %d. Press Enter for status, type help for commands, Ctrl+C to stop.\n", paired)
 		return
 	}
 	for i, p := range welcomeParagraphs {
