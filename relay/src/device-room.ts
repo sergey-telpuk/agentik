@@ -300,7 +300,7 @@ export class DeviceRoom implements DurableObject {
     while (pending.length >= LIMITS.maxPending) {
       const oldest = pending.shift();
       if (oldest === undefined) break;
-      this.#send(
+      this.#sendFinal(
         oldest.ws,
         errorMessage("too_many_connections", "evicted to admit a newer connection"),
       );
@@ -514,7 +514,7 @@ export class DeviceRoom implements DurableObject {
         this.#closeWith(ws, "too_many_connections", "too many clients attached to this device");
         return;
       }
-      this.#send(
+      this.#sendFinal(
         victim,
         errorMessage("too_many_connections", "evicted while idle to admit a newer client"),
       );
@@ -573,7 +573,7 @@ export class DeviceRoom implements DurableObject {
         );
         return;
       }
-      if (this.#forward(target, serializeServerMessage(frameMessage(payload.data)))) {
+      if (this.#send(target, frameMessage(payload.data))) {
         this.#touch(target);
       } else {
         this.#send(
@@ -611,17 +611,6 @@ export class DeviceRoom implements DurableObject {
         return;
       }
     }
-  }
-
-  /**
-   * Sends a frame to a client within its queue budget. A client that would
-   * exceed it is closed and the device is told it left; the frame is
-   * dropped rather than buffered.
-   */
-  #forward(target: WebSocket, message: string): boolean {
-    if (this.#deliver(target, message, LIMITS.maxBufferedBytes)) return true;
-    this.#drop(target, CLOSE_CODES.slowReceiver, "receive queue limit exceeded");
-    return false;
   }
 
   /**
@@ -743,13 +732,36 @@ export class DeviceRoom implements DurableObject {
     return windowCount <= allowed;
   }
 
-  #send(ws: WebSocket, message: ServerMessage): void {
-    this.#deliver(ws, serializeServerMessage(message), Number.POSITIVE_INFINITY);
+  /**
+   * Sends a relay message within the receiver's queue budget. A receiver
+   * that would exceed it is closed and its peers are told it left; the
+   * message is dropped rather than queued, so a peer that never reads
+   * cannot make the relay hold an unbounded backlog of replies.
+   */
+  #send(ws: WebSocket, message: ServerMessage): boolean {
+    if (this.#deliver(ws, serializeServerMessage(message), this.#budget(ws))) return true;
+    this.#drop(ws, CLOSE_CODES.slowReceiver, "receive queue limit exceeded");
+    return false;
+  }
+
+  /**
+   * Sends the last message before the relay closes a socket. It is dropped
+   * if it does not fit: the socket is closing anyway.
+   */
+  #sendFinal(ws: WebSocket, message: ServerMessage): void {
+    this.#deliver(ws, serializeServerMessage(message), this.#budget(ws));
+  }
+
+  /** The most a socket's queue may hold of the relay's messages. */
+  #budget(ws: WebSocket): number {
+    return readState(ws)?.role === "device"
+      ? LIMITS.maxDeviceBufferedBytes
+      : LIMITS.maxBufferedBytes;
   }
 
   /** Reports an error and closes the socket. */
   #closeWith(ws: WebSocket, code: ErrorCode, message: string): void {
-    this.#send(ws, errorMessage(code, message));
+    this.#sendFinal(ws, errorMessage(code, message));
     this.#drop(ws, CLOSE_CODES.protocolError, code);
   }
 

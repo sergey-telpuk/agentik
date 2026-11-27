@@ -181,6 +181,29 @@ describe("slow receiver", () => {
     daemon.close();
     other.close();
   });
+
+  it("closes a client that does not read its error replies instead of queueing them", async () => {
+    const device = await createDevice();
+    const daemon = await connectRegisteredDevice(device);
+    const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    await expectMessage(daemon, "peer_state");
+
+    await runInDurableObject(roomFor(device), async (instance: DeviceRoom, state) => {
+      const phoneSide = socketWhere(state, (a) => a["connectionId"] === phone.connectionId);
+      fill(phoneSide, LIMITS.maxBufferedBytes - 10);
+      for (let i = 0; i < 5; i++) await instance.webSocketMessage(phoneSide, "{}");
+      expect(phoneSide.bufferedAmount).toBeLessThanOrEqual(LIMITS.maxBufferedBytes);
+    });
+
+    expect((await phone.waitClosed()).code).toBe(4002);
+    expect(await expectMessage(daemon, "peer_state")).toEqual({
+      type: "peer_state",
+      connectionId: phone.connectionId,
+      present: false,
+    });
+    expect(daemon.closed).toBeNull();
+    daemon.close();
+  });
 });
 
 describe("slow device", () => {
@@ -256,6 +279,32 @@ describe("slow device", () => {
     });
     expect(daemon.closed).toBeNull();
     daemon.close();
+  });
+
+  it("closes a device that does not read its own replies, and tells its clients", async () => {
+    const device = await createDevice();
+    const daemon = await connectRegisteredDevice(device);
+    const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    await expectMessage(daemon, "peer_state");
+
+    // The device addresses a client that is not there, over and over, and
+    // reads none of the replies.
+    const misaddressed = JSON.stringify({
+      type: "frame",
+      data: encodeBase64(new Uint8Array([1])),
+      connection_id: "0".repeat(32),
+    });
+    await runInDurableObject(roomFor(device), async (instance: DeviceRoom, state) => {
+      const daemonSide = socketWhere(state, (a) => a["role"] === "device");
+      fill(daemonSide, LIMITS.maxDeviceBufferedBytes - 10);
+      for (let i = 0; i < 5; i++) await instance.webSocketMessage(daemonSide, misaddressed);
+      expect(daemonSide.bufferedAmount).toBeLessThanOrEqual(LIMITS.maxDeviceBufferedBytes);
+    });
+
+    expect((await daemon.waitClosed()).code).toBe(4002);
+    expect(await expectMessage(phone, "peer_state")).toEqual({ type: "peer_state", present: false });
+    expect(phone.closed).toBeNull();
+    phone.close();
   });
 
   it("refuses an attach while the device is far behind, without closing the device", async () => {

@@ -10,8 +10,9 @@
  * - at most `maxFramesPerWindow` messages per `rateWindowMs` from a client,
  *   `maxDeviceFramesPerWindow` from the device (it serves every client);
  *   keepalive pings are answered by the platform and do not count;
- * - at most `maxBufferedBytes` queued toward a client; a slower client is
- *   closed instead of letting the queue grow.
+ * - at most `maxBufferedBytes` queued toward a client, frames and the
+ *   relay's own replies alike; a slower client is closed instead of
+ *   letting the queue grow.
  *
  * Enforced on the device's queue (in the Durable Object), which every client
  * of the device writes into:
