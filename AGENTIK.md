@@ -1,223 +1,223 @@
 # Agentik
 
-## Статус документа
+## Document status
 
-- Версия: 0.1.
-- Дата: 27 ноября 2026 года.
-- Репозиторий: [sergey-telpuk/agentik](https://github.com/sergey-telpuk/agentik).
-- Рабочая ветка: `main`.
-- Целевая локальная папка: `~/Projects/agentik`.
-- Статус: проектная документация для реализации. Возможности ниже являются требованиями, а не утверждением о готовом или проверенном приложении.
+- Version: 0.1.
+- Date: 27 November 2026.
+- Repository: [sergey-telpuk/agentik](https://github.com/sergey-telpuk/agentik).
+- Working branch: `main`.
+- Target local directory: `~/Projects/agentik`.
+- Status: design documentation for implementation. The capabilities below are requirements, not a claim about a finished or verified application.
 
-## 1. Назначение
+## 1. Purpose
 
-Agentik — приложение внутри Telegram для удалённого управления AI-агентами на собственном компьютере. Пользователь один раз устанавливает локальное приложение, привязывает телефон и затем выбирает компьютер, проект и задачу в графическом интерфейсе Telegram Mini App.
+Agentik is an application inside Telegram for remotely controlling AI agents on your own computer. The user installs the local application once, pairs their phone, and then selects a computer, a project, and a task in the graphical interface of a Telegram Mini App.
 
-**Основное обещание:** выполнение задач, проекты и постоянная история находятся на компьютере пользователя. Общий облачный сервис пересылает сообщения, зашифрованные между Mini App и компьютером, и не хранит историю задач.
+**Core promise:** task execution, projects, and persistent history live on the user's computer. A shared cloud service forwards messages encrypted between the Mini App and the computer, and stores no task history.
 
-Продукт разрабатывается с нуля. Использование библиотек, стандартных протоколов и официальных интерфейсов агентов допускается; кодовая база конкурентов не используется.
+The product is built from scratch. Using libraries, standard protocols, and official agent interfaces is allowed; no competitor's codebase is used.
 
-### 1.1. Зафиксированные решения
+### 1.1. Settled decisions
 
-| Область | Решение |
+| Area | Decision |
 | --- | --- |
-| Основной интерфейс | Telegram Mini App, React и TypeScript |
-| Локальное приложение | Go, отдельная самодостаточная сборка для каждой поддерживаемой платформы |
-| Локальное состояние | SQLite; ключи — в защищённом хранилище ОС, где оно доступно |
-| Удалённый транспорт | Исходящие WebSocket-соединения через HTTPS/WSS |
-| Облачная часть | Один ретранслятор на Cloudflare Workers и Durable Objects |
-| Сквозное шифрование | Noise между Mini App и локальным приложением |
-| Первый агент | Установленный и авторизованный на ПК Codex через App Server по stdio |
-| Распространение | GitHub Releases; выбор реально опубликованной сборки в Mini App |
-| Разработка | Документация и последующая реализация в `main`, без force push |
+| Primary interface | Telegram Mini App, React and TypeScript |
+| Local application | Go, a separate self-contained build for each supported platform |
+| Local state | SQLite; keys in the OS secure store where one is available |
+| Remote transport | Outbound WebSocket connections over HTTPS/WSS |
+| Cloud component | A single relay on Cloudflare Workers and Durable Objects |
+| End-to-end encryption | Noise between the Mini App and the local application |
+| First agent | Codex installed and authorized on the PC, over App Server via stdio |
+| Distribution | GitHub Releases; the Mini App offers only builds actually published |
+| Development | Documentation and subsequent implementation in `main`, no force push |
 
-WebRTC, Pion, STUN, TURN, MQTT, Nostr и отдельный push-провайдер в этой версии не используются. Весь удалённый трафик проходит через ретранслятор в зашифрованном виде. Это выбранный компромисс для простой и предсказуемой связи.
+WebRTC, Pion, STUN, TURN, MQTT, Nostr, and a separate push provider are not used in this version. All remote traffic passes through the relay in encrypted form. This is the chosen trade-off for simple, predictable connectivity.
 
-### 1.2. Границы обещаний
+### 1.2. Limits of the promise
 
-- Общий облачный ретранслятор существует; пользователь не разворачивает собственный сервер.
-- Телефон хранит собственный ключ доступа и список привязанных компьютеров. Отображаемые данные также присутствуют в памяти Mini App.
-- Провайдер ретранслятора видит сетевые адреса, время, размеры и другие метаданные соединений.
-- Codex и другие облачные агенты могут отправлять контекст своему AI-провайдеру. Локальный запуск агента не означает локальное выполнение модели.
-- Компьютер должен быть включён, подключён к сети; локальное приложение должно работать. Пробуждение спящего или выключенного ПК не входит в первую версию.
-- Бесплатные квоты инфраструктуры не означают бесплатную эксплуатацию при любом масштабе и не включают стоимость моделей и подписи установщиков.
+- A shared cloud relay exists; the user does not deploy their own server.
+- The phone stores its own access key and the list of paired computers. The displayed data is also held in the Mini App's memory.
+- The relay provider sees network addresses, timing, sizes, and other connection metadata.
+- Codex and other cloud agents may send context to their AI provider. Running an agent locally does not mean the model runs locally.
+- The computer must be powered on and connected to the network, and the local application must be running. Waking a sleeping or powered-off PC is out of scope for the first version.
+- Free infrastructure quotas do not mean free operation at any scale, and do not cover the cost of models or of installer signing.
 
-## 2. Пользовательский сценарий
+## 2. User scenario
 
-### 2.1. Первичная установка
+### 2.1. Initial setup
 
-1. Пользователь открывает Agentik внутри Telegram и выбирает «Подключить компьютер».
-2. Выбирает ОС и архитектуру целевого компьютера. ОС телефона не используется для автоматического выбора сборки ПК.
-3. На компьютере открывает ссылку, скачивает и запускает приложение. Скачивание бинарника на телефон само по себе не устанавливает его на ПК.
-4. Локальный мастер создаёт идентичность компьютера, подключается к ретранслятору и показывает QR для привязки.
-5. Пользователь сканирует QR из Mini App на телефоне.
-6. На компьютере подтверждает конкретное новое устройство и проверенный Telegram-аккаунт, затем выбирает разрешённые проекты.
-7. Mini App получает список доступных проектов и сведения об установленном агенте непосредственно от ПК.
+1. The user opens Agentik inside Telegram and chooses "Connect a computer".
+2. They select the OS and architecture of the target computer. The phone's OS is not used to pick the PC build automatically.
+3. On the computer they open the link, download the application, and run it. Downloading the binary onto the phone does not by itself install it on the PC.
+4. The local wizard creates the computer's identity, connects to the relay, and displays a pairing QR code.
+5. The user scans the QR code from the Mini App on their phone.
+6. On the computer they confirm this specific new device and the verified Telegram account, then select the permitted projects.
+7. The Mini App receives the list of available projects and details of the installed agent directly from the PC.
 
-Настройку общего Mini App через BotFather выполняет разработчик. Пользователь не создаёт собственного бота и не копирует Bot Token. Telegram предоставляет интерфейсы запуска Mini App, QR-сканирования и скачивания файлов; их доступность проверяется на поддерживаемых клиентах. [S1]
+Setting up the shared Mini App through BotFather is the developer's job. The user does not create their own bot and does not copy a Bot Token. Telegram provides the interfaces for launching a Mini App, scanning QR codes, and downloading files; their availability is verified on the supported clients. [S1]
 
-### 2.2. Ежедневная работа
+### 2.2. Day-to-day use
 
-1. Открыть Agentik и выбрать ранее привязанный компьютер.
-2. Дождаться подтверждённого защищённого соединения.
-3. Выбрать разрешённый проект и существующую либо новую сессию агента.
-4. Отправить задачу и видеть её фактическое состояние.
-5. При необходимости подтвердить конкретную операцию, добавить сообщение либо запросить остановку.
-6. Посмотреть результат и изменения файлов.
+1. Open Agentik and select a previously paired computer.
+2. Wait for a confirmed secure connection.
+3. Select a permitted project and an existing or new agent session.
+4. Submit a task and watch its actual state.
+5. Where needed, approve a specific operation, add a message, or request a stop.
+6. Review the result and the file changes.
 
-Закрытие Mini App не отменяет выполняющуюся задачу. После возвращения интерфейс восстанавливает состояние с компьютера. Недоступность ПК не означает ни успеха, ни остановки задачи.
+Closing the Mini App does not cancel a running task. On return, the interface restores state from the computer. An unreachable PC means neither success nor a stopped task.
 
-## 3. Состав системы
+## 3. System components
 
 ### 3.1. Mini App
 
-Mini App отвечает за экраны устройств, проектов, сессий, задач, результатов и подтверждений. Он проверяет закреплённую идентичность ПК, устанавливает Noise-сессию и отображает состояние, полученное от локального приложения.
+The Mini App is responsible for the device, project, session, task, result, and approval screens. It verifies the pinned PC identity, establishes the Noise session, and displays state received from the local application.
 
-Основные экраны:
+Main screens:
 
-| Экран | Основные действия |
+| Screen | Main actions |
 | --- | --- |
-| Компьютеры | Добавить устройство, подключиться, увидеть доступность |
-| Подключение | Выбрать сборку, сканировать QR, увидеть результат привязки |
-| Проекты | Выбрать разрешённый проект и доступного агента |
-| Сессия | Отправить задачу, прочитать события, продолжить диалог |
-| Подтверждение | Рассмотреть конкретную операцию и разрешить либо отклонить её |
-| Результат | Прочитать ответ, посмотреть ограниченный diff и статус выполнения |
-| Доступ | Увидеть привязки и отозвать телефон согласно локальным правам |
+| Computers | Add a device, connect, see availability |
+| Connect | Pick a build, scan the QR code, see the pairing outcome |
+| Projects | Select a permitted project and an available agent |
+| Session | Submit a task, read events, continue the dialogue |
+| Approval | Review a specific operation and allow or reject it |
+| Result | Read the response, view a bounded diff and execution status |
+| Access | See pairings and revoke a phone according to local permissions |
 
-История задач не синхронизируется через Telegram CloudStorage. Список ПК хранится локально на телефоне; новый телефон проходит отдельную привязку.
+Task history is not synchronized through Telegram CloudStorage. The list of PCs is stored locally on the phone; a new phone goes through its own pairing.
 
-### 3.2. Локальное приложение
+### 3.2. Local application
 
-Go-приложение выполняет следующие функции:
+The Go application performs the following functions:
 
-- локальная настройка проектов и разрешений;
-- создание и хранение идентичности компьютера;
-- регистрация на ретрансляторе и автоматическое переподключение;
-- привязка, аутентификация и отзыв телефонов;
-- запуск и управление поддерживаемым агентом;
-- сохранение задач, событий, подтверждений и результатов в SQLite;
-- диагностика соединения и доступности агента;
-- проверка подписанных обновлений перед их установкой.
+- local project and permission configuration;
+- creating and storing the computer's identity;
+- registering with the relay and reconnecting automatically;
+- pairing, authenticating, and revoking phones;
+- launching and managing the supported agent;
+- persisting tasks, events, approvals, and results in SQLite;
+- diagnosing connectivity and agent availability;
+- verifying signed updates before installing them.
 
-Приложение запускается с правами обычного пользователя. Автозапуск включается явно в локальном мастере. Локальный интерфейс настройки, если используется HTTP, слушает только loopback и защищается от запросов посторонних сайтов; он не публикуется через relay.
+The application runs with ordinary user privileges. Autostart is enabled explicitly in the local wizard. The local configuration interface, if it uses HTTP, listens on loopback only and is protected against requests from other sites; it is not exposed through the relay.
 
-### 3.3. Ретранслятор
+### 3.3. Relay
 
-Ретранслятор принимает исходящие WSS-соединения компьютера и Mini App, аутентифицирует регистрацию маршрута и пересылает пакеты. Он не запускает команды и не получает ключи Noise.
+The relay accepts outbound WSS connections from the computer and the Mini App, authenticates route registration, and forwards packets. It does not run commands and does not receive Noise keys.
 
-Один Durable Object обслуживает соединения одного компьютера. Его адрес детерминированно получается из идентификатора устройства. Отдельная таблица соответствий устройств объектам не требуется.
+One Durable Object serves the connections of one computer. Its address is derived deterministically from the device identifier. No separate device-to-object mapping table is required.
 
-На стороне ретранслятора допускаются только сведения, необходимые для текущих соединений: роли, публичные идентификаторы, ограничения, challenge и краткоживущие маршруты. Пользовательские сообщения не записываются в Storage API или журналы. Connection attachments могут переживать hibernation; нельзя обещать, что инфраструктурные метаданные физически существуют только в оперативной памяти. [S3]
+Only the data needed for current connections is allowed on the relay side: roles, public identifiers, limits, challenges, and short-lived routes. User messages are not written to the Storage API or to logs. Connection attachments can survive hibernation; it cannot be promised that infrastructure metadata exists only in RAM. [S3]
 
-Используется Hibernation WebSocket API. Открытый канал может сохраняться, пока обработчик выгружен; сообщение активирует обработку. Keepalive реализуется средствами платформы, без постоянных серверных таймеров, мешающих гибернации. [S3]
+The Hibernation WebSocket API is used. An open channel can persist while the handler is evicted; a message activates processing. Keepalive is implemented with platform facilities, without persistent server-side timers that would prevent hibernation. [S3]
 
-## 4. Хранение и сущности
+## 4. Storage and entities
 
-| Данные | Место хранения | Примечание |
+| Data | Storage location | Note |
 | --- | --- | --- |
-| Исходные файлы проектов | Компьютер | Обычная файловая система пользователя |
-| Задачи, история, события, результаты | SQLite на компьютере | Источник истины для интерфейса |
-| Пути проектов и разрешения | Компьютер | Через relay передаются только внутри Noise |
-| Ключи и авторизация AI-агента | Штатное локальное хранилище агента | Не экспортируются на сервер Agentik |
-| Приватные ключи ПК | Компьютер | Не передаются на телефон или relay |
-| Ключ телефона | Защищённое хранилище телефона | Доступность проверяется для каждой платформы |
-| Список ПК и закреплённые публичные ключи | Локальное хранилище Mini App | Не является облачной синхронизацией |
-| Метаданные текущих подключений | Ретранслятор | Без истории задач |
+| Project source files | Computer | The user's ordinary file system |
+| Tasks, history, events, results | SQLite on the computer | Source of truth for the interface |
+| Project paths and permissions | Computer | Transmitted through the relay only inside Noise |
+| AI agent keys and authorization | The agent's own local store | Not exported to an Agentik server |
+| PC private keys | Computer | Not transmitted to the phone or the relay |
+| Phone key | The phone's secure store | Availability verified per platform |
+| List of PCs and pinned public keys | Mini App local storage | Not cloud synchronization |
+| Current connection metadata | Relay | No task history |
 
-Telegram предоставляет DeviceStorage и SecureStorage. SecureStorage нельзя считать защитой от изменённого кода самого Mini App: приложение может получить сохранённое значение. Если поддерживаемое защищённое хранение недоступно, постоянный ключ не сохраняется молча в обычный localStorage. Первая версия либо предоставляет явно временную сессию, либо сообщает об отсутствии поддержки постоянного доступа. [S1, S2]
+Telegram provides DeviceStorage and SecureStorage. SecureStorage cannot be treated as protection against modified Mini App code: the application can read back a stored value. If supported secure storage is unavailable, a persistent key is not silently written to ordinary localStorage. The first version either offers an explicitly temporary session or reports that persistent access is not supported. [S1, S2]
 
-### 4.1. Логическая модель SQLite
+### 4.1. Logical SQLite model
 
-| Сущность | Назначение |
+| Entity | Purpose |
 | --- | --- |
-| `trusted_clients` | Публичный ключ телефона, Telegram ID, права, дата привязки и отзыва |
-| `projects` | Стабильный ID, отображаемое имя, локальный путь, разрешённый агент |
-| `agent_sessions` | Контекст диалога, проект, адаптер и идентификатор thread агента |
-| `tasks` | Запрос пользователя, состояние выполнения, ссылки на сессию и результат |
-| `commands` | Дедупликация: клиент, request ID, тип, хеш содержимого, статус обработки |
-| `events` | Упорядоченные события с sequence в пределах сессии |
-| `approvals` | Ожидающие решения по конкретным операциям и их срок действия |
-| `pairing_invitations` | Хеш одноразового приглашения, срок, число попыток, состояние |
+| `trusted_clients` | Phone public key, Telegram ID, permissions, pairing and revocation dates |
+| `projects` | Stable ID, display name, local path, permitted agent |
+| `agent_sessions` | Dialogue context, project, adapter, and the agent's thread identifier |
+| `tasks` | User request, execution state, links to session and result |
+| `commands` | Deduplication: client, request ID, method, content hash, processing status |
+| `events` | Ordered events with a sequence number within a session |
+| `approvals` | Pending decisions on specific operations and their expiry |
+| `pairing_invitations` | Hash of a one-time invitation, expiry, attempt count, state |
 
-Схема реализуется миграциями. На компьютере выбирается один платформенный каталог данных; временная рабочая директория процесса не является местом хранения истории. Приватные ключи не записываются в SQLite открытым текстом, если доступно хранилище ОС. Любой fallback хранения должен быть явно описан и проверен для платформы.
+The schema is applied through migrations. A single platform data directory is chosen on the computer; the process's temporary working directory is not where history lives. Private keys are not written to SQLite in plaintext when an OS store is available. Any storage fallback must be described explicitly and verified for the platform.
 
-Сущности «подключение», «сессия агента» и «задача» различаются: разрыв подключения не удаляет сессию и не отменяет задачу.
+The entities "connection", "agent session", and "task" are distinct: dropping a connection does not delete a session and does not cancel a task.
 
-## 5. Идентификация и привязка
+## 5. Identity and pairing
 
-### 5.1. Разделение ключей
+### 5.1. Key separation
 
-Компьютер имеет две разные криптографические идентичности:
+The computer has two distinct cryptographic identities:
 
-- Ed25519 — доказательство владения адресом устройства при регистрации на relay;
-- X25519 — постоянный ключ Noise для защищённого канала с телефоном.
+- Ed25519 — proof of ownership of the device address when registering with the relay;
+- X25519 — the long-term Noise key for the secure channel with the phone.
 
-Эти ключи не взаимозаменяемы. QR и проверяемый дескриптор привязки связывают их с одним устройством. Предлагаемый `device_id` — SHA-256 публичного ключа регистрации relay в фиксированном формате.
+These keys are not interchangeable. The QR code and the verifiable pairing descriptor bind them to one device. The proposed `device_id` is the SHA-256 of the relay registration public key in a fixed encoding.
 
-Телефон хранит собственную идентичность Noise. Знание `device_id`, успешный WebSocket и даже проверенный Telegram ID не дают права управлять компьютером.
+The phone holds its own Noise identity. Knowing a `device_id`, a successful WebSocket, or even a verified Telegram ID does not grant the right to control the computer.
 
-### 5.2. Регистрация компьютера на relay
+### 5.2. Registering a computer with the relay
 
-1. Компьютер открывает WSS и сообщает публичный ключ регистрации.
-2. Relay выдаёт случайный challenge с коротким сроком, привязанный к этому сокету.
-3. Компьютер подписывает контекст `agentik-relay-register-v1`, роль, идентификатор relay, `device_id`, challenge и срок действия.
-4. Relay проверяет подпись, срок и соответствие challenge текущему соединению.
-5. Только после проверки подключение становится активным маршрутом компьютера.
+1. The computer opens a WSS connection and presents its registration public key.
+2. The relay issues a random, short-lived challenge bound to that socket.
+3. The computer signs the context `agentik-relay-register-v1`, the role, the relay identifier, the `device_id`, the challenge, and the expiry.
+4. The relay verifies the signature, the expiry, and that the challenge matches the current connection.
+5. Only after verification does the connection become the computer's active route.
 
-Подписываемые данные получают однозначную сериализацию: фиксированный порядок и длины полей либо каноническое представление. Произвольная сериализация JSON не используется как неявный контракт подписи.
+Signed data uses an unambiguous serialization: fixed field order and lengths, or a canonical encoding. Arbitrary JSON serialization is not used as an implicit signing contract.
 
-Неавторизованное соединение не вытесняет работающий daemon. Повторная регистрация с доказательством того же ключа заменяет старое подключение по явно заданному правилу. Proof of possession защищает маршрут, но отдельно требуются лимиты, препятствующие массовому созданию новых устройств злоумышленником.
+An unauthorized connection does not evict a running daemon. Re-registration with proof of the same key replaces the old connection under an explicitly defined rule. Proof of possession protects the route, but separate limits are still required to prevent an attacker from mass-creating new devices.
 
-### 5.3. Первичная привязка телефона
+### 5.3. Initial phone pairing
 
-QR содержит версию, адрес relay, идентификатор компьютера, оба публичных ключа и одноразовое высокоэнтропийное приглашение. Приглашение передаётся по защищённому каналу, имеет TTL и расходуется после успешного подтверждения. Оно не помещается в постоянные URL или логи. Короткий цифровой код может служить проверочным отображением, но не единственным секретом доступа.
+The QR code contains the version, the relay address, the computer identifier, both public keys, and a one-time high-entropy invitation. The invitation travels over the secure channel, has a TTL, and is consumed after a successful confirmation. It is not placed in persistent URLs or logs. A short numeric code may serve as a verification display, but not as the sole access secret.
 
-Телефон закрепляет Noise-ключ ПК из QR. После полного handshake daemon проверяет приглашение и Telegram identity, затем показывает локальный запрос. Пользователь подтверждает именно эту pending-привязку и именно этот публичный ключ телефона.
+The phone pins the PC's Noise key from the QR code. After the full handshake, the daemon verifies the invitation and the Telegram identity, then shows a local prompt. The user confirms this specific pending pairing and this specific phone public key.
 
-| Состояние | Доступ |
+| State | Access |
 | --- | --- |
-| `unpaired` | Только интерфейс подключения |
-| `handshaking` | Криптографический обмен, без команд агента |
-| `awaiting_local_approval` | Ожидание решения на ПК, без чтения проектов |
-| `paired` | Доступ в пределах сохранённых локальных прав |
-| `expired` / `rejected` | Новая попытка требует действительного приглашения |
-| `revoked` | Доступ прекращён, автоматического восстановления нет |
+| `unpaired` | Connection interface only |
+| `handshaking` | Cryptographic exchange, no agent commands |
+| `awaiting_local_approval` | Waiting for a decision on the PC, no project reads |
+| `paired` | Access within the stored local permissions |
+| `expired` / `rejected` | A new attempt requires a valid invitation |
+| `revoked` | Access terminated, no automatic restoration |
 
 ### 5.4. Telegram identity
 
-Daemon проверяет сырое `initData`: подпись Ed25519, ожидаемый `bot_id`, корректность формата и свежесть `auth_date`. Telegram документирует проверку третьей стороной без Bot Token. `initDataUnsafe` не считается доказательством личности. [S1]
+The daemon verifies the raw `initData`: the Ed25519 signature, the expected `bot_id`, the format, and the freshness of `auth_date`. Telegram documents third-party verification without a Bot Token. `initDataUnsafe` is not treated as proof of identity. [S1]
 
-Проверенный Telegram ID связывается с ключом телефона в локальных правах. Допустимый возраст `initData` и поведение после долгой открытой сессии фиксируются в протоколе: существующая аутентифицированная сессия не переходит в обход проверки, а новое подключение при необходимости требует обновить запуск Mini App.
+The verified Telegram ID is bound to the phone key in the local permissions. The acceptable age of `initData` and the behaviour after a long open session are fixed in the protocol: an existing authenticated session does not become a way around verification, and a new connection requires a fresh Mini App launch where necessary.
 
-### 5.5. Отзыв и ротация
+### 5.5. Revocation and rotation
 
-Отзыв выполняется на ПК: ключ помечается отозванным, его активные каналы закрываются, последующие операции отклоняются. Проверка прав выполняется и при подключении, и перед чувствительной операцией.
+Revocation is performed on the PC: the key is marked revoked, its active channels are closed, and subsequent operations are rejected. Permissions are checked both at connection time and before a sensitive operation.
 
-Смена ключа компьютера в v0.1 требует повторной локальной привязки. Несовпадение закреплённого ключа не исправляется автоматическим принятием нового.
+Changing the computer's key in v0.1 requires pairing again locally. A pinned-key mismatch is not resolved by automatically accepting the new key.
 
-## 6. Защищённый протокол
+## 6. Secure protocol
 
 ### 6.1. Noise
 
-Базовый профиль для проверки реализации: `Noise_XX_25519_ChaChaPoly_SHA256`. Noise XX поддерживает передачу постоянных публичных ключей и взаимную аутентификацию; приложение обязано отдельно устанавливать доверие к этим ключам. [S6]
+The baseline profile for verifying the implementation is `Noise_XX_25519_ChaChaPoly_SHA256`. Noise XX supports transmitting static public keys and mutual authentication; the application must establish trust in those keys separately. [S6]
 
-Телефон сверяет ключ ПК после второго сообщения XX; daemon проверяет ключ телефона после третьего. Команды агента принимаются только после полного handshake и локальной авторизации. Команды в ранних handshake payload и 0-RTT не поддерживаются.
+The phone checks the PC's key after the second XX message; the daemon checks the phone's key after the third. Agent commands are accepted only after the full handshake and local authorization. Commands in early handshake payloads and 0-RTT are not supported.
 
-Prologue связывает протокол Agentik, версию, роли и целевой компьютер. Контекст соединения согласуется и проверяется, чтобы нельзя было перенести сообщения между разными каналами. После любого reconnect выполняется новый handshake; старые nonce и transport keys не восстанавливаются.
+The prologue binds the Agentik protocol, the version, the roles, and the target computer. The connection context is negotiated and verified so that messages cannot be replayed across different channels. After any reconnect a new handshake is performed; old nonces and transport keys are not restored.
 
-Криптографические примитивы не реализуются самостоятельно. Go-библиотека с общей native/WASM-сборкой — кандидат для реализации, а не уже проверенная зависимость. До фиксации версии обязательны тестовые векторы и совместимость с целевыми Telegram WebView.
+Cryptographic primitives are not implemented in-house. A Go library with a shared native/WASM build is a candidate for the implementation, not an already-vetted dependency. Test vectors and compatibility with the target Telegram WebViews are required before a version is fixed.
 
-### 6.2. Внешние и внутренние сообщения
+### 6.2. Outer and inner messages
 
-| Уровень | Разрешённое содержимое |
+| Layer | Permitted content |
 | --- | --- |
-| Внешний relay-envelope | Версия, непрозрачный device ID, connection ID, тип транспорта, ciphertext |
-| Внутреннее сообщение Noise | Команда, параметры проекта, задача, текст, результат, diff, подтверждение |
+| Outer relay envelope | Version, opaque device ID, connection ID, transport type, ciphertext |
+| Inner Noise message | Command, project parameters, task, text, result, diff, approval |
 
-Внешние поля не содержат локальных путей, названий проектов, промптов или результатов. Envelope задаёт маршрутизацию, но не полномочия; полномочия проверяет ПК.
+Outer fields contain no local paths, project names, prompts, or results. The envelope determines routing, not authority; authority is checked by the PC.
 
-Проектный пример внутренней команды, не готовый публичный API:
+A draft example of an inner command, not a finished public API:
 
 ```json
 {
@@ -228,240 +228,239 @@ Prologue связывает протокол Agentik, версию, роли и 
     "project_id": "project_local_1",
     "session_id": null,
     "agent": "codex",
-    "prompt": "Проверь тесты и предложи исправление"
+    "prompt": "Check the tests and propose a fix"
   }
 }
 ```
 
-`project_id` разрешается на ПК по локальному каталогу проектов. Произвольный путь и shell-команда из сети не становятся параметрами запуска daemon.
+`project_id` is resolved on the PC against the local project catalogue. An arbitrary path or shell command from the network does not become a daemon launch parameter.
 
-### 6.3. Команды v0.1
+### 6.3. v0.1 commands
 
-| Метод | Назначение |
+| Method | Purpose |
 | --- | --- |
-| `device.info` | Сведения о подключённом компьютере и возможностях |
-| `project.list` | Доступные текущему клиенту проекты |
-| `agent.list` | Обнаруженные агенты и состояние совместимости |
-| `session.list` / `session.open` | Работа с локальными сессиями |
-| `task.start` | Создание задачи с обязательным request ID |
-| `task.get` | Подтверждённое состояние задачи |
-| `task.cancel` | Запрос остановки; не мгновенное подтверждение отмены |
-| `approval.resolve` | Решение по конкретной ожидающей операции |
-| `events.resume` | Восстановление событий после sequence |
-| `changes.get` | Ограниченный результат просмотра изменений |
+| `device.info` | Details about the connected computer and its capabilities |
+| `project.list` | Projects available to the current client |
+| `agent.list` | Discovered agents and compatibility status |
+| `session.list` / `session.open` | Working with local sessions |
+| `task.start` | Creating a task with a mandatory request ID |
+| `task.get` | Confirmed task state |
+| `task.cancel` | A stop request; not an immediate confirmation of cancellation |
+| `approval.resolve` | A decision on one specific pending operation |
+| `events.resume` | Replaying events after a sequence number |
+| `changes.get` | A bounded view of the resulting changes |
 
-Названия методов и JSON Schema фиксируются перед реализацией клиентов. Неизвестная версия, метод, лишние опасные параметры и превышение лимитов дают явную ошибку.
+Method names and the JSON Schema are fixed before clients are implemented. An unknown version, method, extra dangerous parameters, or exceeded limits produce an explicit error.
 
-## 7. Задачи, дедупликация и восстановление
+## 7. Tasks, deduplication, and recovery
 
-### 7.1. Состояния задачи
+### 7.1. Task states
 
-| Состояние | Значение |
+| State | Meaning |
 | --- | --- |
-| `accepted` | Запрос проверен и записан в SQLite |
-| `starting` | Запуск начат, выполнение ещё не подтверждено |
-| `running` | Агент подтвердил выполнение |
-| `awaiting_approval` | Ожидание решения по операции |
-| `cancel_requested` | Остановка запрошена, завершение ещё не подтверждено |
-| `succeeded` | Агент сообщил об успешном завершении |
-| `failed` | Получена подтверждённая ошибка |
-| `cancelled` | Остановка подтверждена |
-| `recovery_required` | После сбоя результат или непрерывность выполнения неизвестны |
+| `accepted` | The request was validated and written to SQLite |
+| `starting` | Launch has begun, execution is not yet confirmed |
+| `running` | The agent confirmed execution |
+| `awaiting_approval` | Waiting for a decision on an operation |
+| `cancel_requested` | A stop was requested, termination is not yet confirmed |
+| `succeeded` | The agent reported successful completion |
+| `failed` | A confirmed error was received |
+| `cancelled` | The stop was confirmed |
+| `recovery_required` | After a crash, the result or the continuity of execution is unknown |
 
-Для v0.1 допускается одна активная задача на рабочую директорию. Второй запуск получает понятный статус занятости. Параллельная работа в разных проектах ограничивается локальной настройкой.
+For v0.1, one active task per working directory is allowed. A second launch receives a clear "busy" status. Parallel work across different projects is bounded by local configuration.
 
-### 7.2. Идемпотентность
+### 7.2. Idempotency
 
-Подтверждение `accepted` отправляется после успешной записи команды в SQLite. Уникальность задаётся парой «идентичность клиента, request ID»; сохраняются также метод и хеш канонического содержимого.
+The `accepted` acknowledgement is sent after the command has been successfully written to SQLite. Uniqueness is defined by the pair (client identity, request ID); the method and the hash of the canonical content are stored as well.
 
-- Повтор с тем же содержимым возвращает существующую задачу и её состояние.
-- Тот же request ID с другим содержимым отклоняется как конфликт.
-- Переподключение само по себе не создаёт новую задачу.
+- A repeat with the same content returns the existing task and its state.
+- The same request ID with different content is rejected as a conflict.
+- Reconnecting does not by itself create a new task.
 
-**Exactly-once запуск внешнего процесса не обещается.** Между операцией ОС и записью в SQLite существует окно сбоя. Runtime сохраняет намерение запуска, связывает его с идентификатором thread агента и после аварии сверяет состояние. Если установить результат нельзя, задача становится `recovery_required` и не запускается автоматически повторно. Один PID недостаточен для надёжной идентификации процесса.
+**Exactly-once launch of an external process is not promised.** There is a failure window between the OS operation and the SQLite write. The runtime records the intent to launch, links it to the agent's thread identifier, and reconciles state after a crash. If the result cannot be established, the task becomes `recovery_required` and is not relaunched automatically. A PID alone is not enough to identify a process reliably.
 
-### 7.3. Восстановление связи
+### 7.3. Connection recovery
 
-Рабочее соединение проходит состояния `disconnected`, `relay_connected`, `handshaking`, `authenticated`, `synchronizing`, `ready`.
+A working connection passes through the states `disconnected`, `relay_connected`, `handshaking`, `authenticated`, `synchronizing`, `ready`.
 
-При разрыве агент продолжает работать, пока работают ПК и daemon. Клиент переподключается с ограниченным exponential backoff и jitter, проходит новую аутентификацию и запрашивает события после последнего обработанного sequence.
+On a disconnect the agent keeps running as long as the PC and the daemon are running. The client reconnects with bounded exponential backoff and jitter, authenticates again, and requests events after the last processed sequence number.
 
-Sequence монотонен в пределах сессии. Если старые события удалены локальной политикой хранения, ПК возвращает снимок состояния и новый курсор. Интерфейс не подменяет отсутствие событий выводом об успешном окончании задачи.
+Sequence numbers are monotonic within a session. If old events were removed by the local retention policy, the PC returns a state snapshot and a new cursor. The interface does not substitute missing events with a claim that the task finished successfully.
 
-Перезапуск relay не должен влиять на локальное выполнение. Перезапуск daemon — отдельный аварийный сценарий: сохранение процесса и возможность восстановления управления зависят от агента и ОС и должны быть проверены.
+A relay restart must not affect local execution. A daemon restart is a separate failure scenario: whether the process survives and whether control can be recovered depends on the agent and the OS, and must be verified.
 
-### 7.4. Подтверждения
+### 7.4. Approvals
 
-Подтверждение связано с task ID, session ID, уникальным approval ID, точным действием и сроком. Повторное или просроченное решение отклоняется. Отказ относится к запрошенной операции; потеря телефона не означает автоматического разрешения.
+An approval is bound to a task ID, a session ID, a unique approval ID, the exact action, and an expiry. A repeated or expired decision is rejected. A rejection applies to the requested operation; losing the phone does not imply automatic approval.
 
-## 8. Интеграция агента и ограничения доступа
+## 8. Agent integration and access limits
 
-Первым адаптером реализуется Codex App Server по stdio. App Server документирует JSONL-транспорт, инициализацию, thread и turn. Его порт не публикуется в интернет: Agentik работает с локальным дочерним процессом. [S7]
+The first adapter implemented is the Codex App Server over stdio. The App Server documents the JSONL transport, initialization, threads, and turns. Its port is not exposed to the internet: Agentik works with a local child process. [S7]
 
-Адаптер обязан:
+The adapter must:
 
-- обнаруживать бинарник и проверять поддерживаемую версию;
-- диагностировать отсутствие установки или авторизации;
-- создавать и возобновлять поддерживаемые сессии;
-- преобразовывать события в протокол Agentik;
-- передавать решения по подтверждениям и запросы остановки;
-- сохранять связь локальной сессии с thread агента;
-- отличать завершение turn от завершения процесса и потери транспорта.
+- discover the binary and verify a supported version;
+- diagnose a missing installation or missing authorization;
+- create and resume supported sessions;
+- translate events into the Agentik protocol;
+- relay approval decisions and stop requests;
+- maintain the link between the local session and the agent thread;
+- distinguish the end of a turn from process exit and from transport loss.
 
-Общая модель сессий не должна предполагать, что все будущие CLI поддерживают одинаковое возобновление. Возможности объявляются адаптером явно.
+The general session model must not assume that every future CLI supports the same kind of resumption. Capabilities are declared explicitly by the adapter.
 
-Разрешённый проект и Git worktree не являются sandbox. Если агент выполняет shell с правами пользователя, одной проверки рабочей директории недостаточно. Agentik сохраняет ограничения агента и применимые механизмы ОС, не включает глобальное автоматическое одобрение. Проверки путей учитывают symlink и выход за разрешённую область там, где приложение само читает или отдаёт файлы.
+A permitted project and a Git worktree are not a sandbox. If the agent runs a shell with the user's privileges, checking the working directory alone is not enough. Agentik preserves the agent's own restrictions and the applicable OS mechanisms, and does not enable global automatic approval. Path checks account for symlinks and escapes from the permitted area wherever the application itself reads or serves files.
 
-Результаты агента считаются недоверенным содержимым: HTML и Markdown не должны исполнять код в Mini App. Серверные сообщения также не используются как команды запуска или параметры shell.
+Agent output is treated as untrusted content: HTML and Markdown must not execute code in the Mini App. Server messages are likewise not used as launch commands or shell parameters.
 
-## 9. Ресурсы и защита ретранслятора
+## 9. Resources and relay protection
 
-До публичного запуска обязательны:
+The following are required before a public launch:
 
-- ограничения числа неавторизованных и активных соединений;
-- короткие сроки challenge, handshake и неиспользуемых каналов;
-- ограничения размера пакетов, частоты сообщений и очередей;
-- backpressure или отключение медленного получателя вместо накопления данных;
-- защита от вытеснения зарегистрированного компьютера;
-- проверка Telegram identity и правила допуска публичных клиентов;
-- ограничения на источник, устройство и общий расход ресурсов;
-- журналирование ошибок без содержимого задач, секретов и приглашений.
+- limits on the number of unauthorized and active connections;
+- short lifetimes for challenges, handshakes, and unused channels;
+- limits on packet size, message rate, and queue depth;
+- backpressure or disconnection of a slow receiver instead of accumulating data;
+- protection against evicting a registered computer;
+- Telegram identity verification and admission rules for public clients;
+- limits per source, per device, and on total resource consumption;
+- error logging without task content, secrets, or invitations.
 
-Внешний пакет ограничивается сверху; большие результаты передаются частями. Для первого прототипа можно начать с 32 KiB полезной нагрузки кадра, 256 KiB ограниченной очереди на соединение и ограниченного числа каналов на устройство. Это проектные стартовые значения, а не измеренная вместимость; итоговые значения фиксируются после теста backpressure и совместимости Noise.
+The outer packet has an upper bound; large results are transferred in parts. For the first prototype one can start with a 32 KiB frame payload, a bounded 256 KiB queue per connection, and a limited number of channels per device. These are design starting points, not measured capacity; the final values are fixed after backpressure testing and Noise compatibility checks.
 
-Relay не является облачной очередью: если ПК недоступен, новая задача не считается принятой и не обещается к последующей доставке. После закрытия Mini App локальный runtime сохраняет события на ПК, а не передаёт непрерывный поток в пустой канал.
+The relay is not a cloud queue: if the PC is unreachable, a new task is not considered accepted and no later delivery is promised. After the Mini App is closed, the local runtime stores events on the PC rather than streaming continuously into an empty channel.
 
-### 9.1. Бесплатная инфраструктура
+### 9.1. Free infrastructure
 
-На дату документа официально описаны следующие условия:
+As of the document date, the following terms are officially documented:
 
-| Ресурс | Условие |
+| Resource | Terms |
 | --- | --- |
-| Workers Static Assets | Запросы к статическим файлам бесплатны; вызовы Worker считаются отдельно |
-| Workers Free | 100 000 запросов в сутки |
-| Durable Objects Free | 100 000 учитываемых запросов и 13 000 GB-секунд в сутки |
-| Входящие сообщения WebSocket в DO | Для биллинга применяется отношение 20 сообщений к одному запросу |
-| Превышение квот DO Free | Соответствующие операции возвращают ошибки |
+| Workers Static Assets | Requests for static files are free; Worker invocations are counted separately |
+| Workers Free | 100,000 requests per day |
+| Durable Objects Free | 100,000 billable requests and 13,000 GB-seconds per day |
+| Inbound WebSocket messages in a DO | Billing applies a ratio of 20 messages to one request |
+| Exceeding DO Free quotas | The corresponding operations return errors |
 
-Источники: [S3, S4, S5]. Лимиты относятся к разным ресурсам и не складываются в одну квоту. Free-план DO использует SQLite-backed класс; это не требует записывать историю приложения в его Storage API.
+Sources: [S3, S4, S5]. The limits apply to different resources and do not add up to a single quota. The DO free plan uses the SQLite-backed class; this does not require writing application history into its Storage API.
 
-Число поддерживаемых пользователей определяется нагрузочными измерениями. Нельзя выводить его только из числа открытых сокетов. Существенны активные сессии, размер и частота сообщений, время работы объектов, переподключения и обработка злоупотреблений. В интерфейсе сбой из-за квоты должен отображаться как недоступность транспорта, а не потеря локальной истории.
+The number of supported users is determined by load testing. It cannot be derived from the number of open sockets alone. Active sessions, message size and rate, object runtime, reconnects, and abuse handling all matter. In the interface, a quota failure must be shown as transport unavailability, not as loss of local history.
 
-## 10. Дистрибуция и обновления
+## 10. Distribution and updates
 
-В Mini App отображаются только сборки, присутствующие в проверенном release manifest. Для каждой сборки указываются версия, ОС, архитектура, имя файла, размер, checksum и данные проверки подписи.
+The Mini App displays only builds present in a verified release manifest. Each build lists the version, OS, architecture, file name, size, checksum, and signature verification data.
 
-Целевая матрица сборки: macOS ARM64/AMD64, Linux ARM64/AMD64, Windows AMD64/ARM64. Платформа объявляется поддерживаемой только после испытаний, включая установленный Codex. Успешная кросс-компиляция не является подтверждением полной поддержки.
+Target build matrix: macOS ARM64/AMD64, Linux ARM64/AMD64, Windows AMD64/ARM64. A platform is declared supported only after testing, including with Codex installed. Successful cross-compilation is not confirmation of full support.
 
-Самодостаточность относится к Agentik. Go runtime пользователю не нужен; сторонний AI-агент должен быть установлен отдельно. Упаковка может включать обычный установщик вокруг бинарника.
+Self-containment applies to Agentik. The user does not need a Go runtime; the third-party AI agent must be installed separately. Packaging may include a conventional installer around the binary.
 
-Подпись обновлений и подпись, принимаемая операционной системой, решают разные задачи. Для удобной установки отдельно планируются процедуры macOS и Windows. SHA-256 файла не заменяет доверенную подпись релиза.
+Update signing and the signature accepted by the operating system solve different problems. The macOS and Windows procedures for convenient installation are planned separately. A file's SHA-256 is not a substitute for a trusted release signature.
 
-Автообновление не заменяет бинарник во время активной задачи. Новая версия сначала скачивается и проверяется, затем устанавливается в безопасный момент с возможностью отката. Секреты подписи не находятся в репозитории или клиенте.
+Auto-update does not replace the binary while a task is active. A new version is first downloaded and verified, then installed at a safe moment with the ability to roll back. Signing secrets are not kept in the repository or the client.
 
-## 11. Планируемая структура репозитория
+## 11. Planned repository structure
 
-| Путь | Содержимое |
+| Path | Contents |
 | --- | --- |
-| `docs/AGENTIK.md` | Этот документ и принятые архитектурные решения |
-| `daemon/cmd/agentik` | Точка входа Go-приложения |
-| `daemon/internal/identity` | Идентичность ПК и локальное хранение ключей |
-| `daemon/internal/pairing` | Привязка и отзыв клиентов |
-| `daemon/internal/secure` | Обёртка над библиотекой Noise |
-| `daemon/internal/transport` | WSS, reconnect, лимиты и обмен пакетами |
-| `daemon/internal/runtime` | Задачи, сессии, подтверждения и восстановление |
-| `daemon/internal/agents/codex` | Адаптер Codex App Server |
-| `daemon/internal/storage` | SQLite и миграции |
-| `daemon/internal/projects` | Разрешённые проекты и проверка путей |
+| `docs/AGENTIK.md` | This document and the accepted architectural decisions |
+| `daemon/cmd/agentik` | Entry point of the Go application |
+| `daemon/internal/identity` | PC identity and local key storage |
+| `daemon/internal/pairing` | Client pairing and revocation |
+| `daemon/internal/secure` | Wrapper around the Noise library |
+| `daemon/internal/transport` | WSS, reconnect, limits, and packet exchange |
+| `daemon/internal/runtime` | Tasks, sessions, approvals, and recovery |
+| `daemon/internal/agents/codex` | Codex App Server adapter |
+| `daemon/internal/storage` | SQLite and migrations |
+| `daemon/internal/projects` | Permitted projects and path validation |
 | `miniapp` | React/TypeScript Mini App |
-| `relay` | Cloudflare Worker и Durable Object |
-| `protocol` | Схемы сообщений, версии и тестовые векторы |
-| `scripts` | Сборка, проверка и подготовка релиза |
-| `.github/workflows` | CI и выпуск сборок |
+| `relay` | Cloudflare Worker and Durable Object |
+| `protocol` | Message schemas, versions, and test vectors |
+| `scripts` | Build, verification, and release preparation |
+| `.github/workflows` | CI and build releases |
 
-Это целевая структура, а не перечень уже существующих файлов. Версии зависимостей фиксируются при реализации вместе с проверенной матрицей совместимости.
+This is the target structure, not a list of files that already exist. Dependency versions are pinned during implementation together with a verified compatibility matrix.
 
-## 12. Этапы реализации
+## 12. Implementation stages
 
-### Этап 1. Защищённое подключение
+### Stage 1. Secure connection
 
-Relay с регистрацией компьютера, Go-клиент, минимальный Mini App, Noise, QR-привязка и локальное подтверждение. На этапе не запускаются команды ОС: проверяется обмен тестовыми данными, отзыв и переподключение.
+A relay with computer registration, the Go client, a minimal Mini App, Noise, QR pairing, and local confirmation. No OS commands are run at this stage: the exchange of test data, revocation, and reconnection are what get verified.
 
-Готовность: телефон и ПК обмениваются защищёнными сообщениями; relay не видит полезную нагрузку; чужой ключ, подмена pin и повтор приглашения отклоняются.
+Done when: the phone and the PC exchange secure messages; the relay cannot see the payload; a foreign key, a pin substitution, and a replayed invitation are all rejected.
 
-### Этап 2. Локальные задачи
+### Stage 2. Local tasks
 
-SQLite, проектная модель, request ID, события, состояния и адаптер Codex. Запуск, ответ, подтверждение, отмена и возобновление поддерживаемой сессии проходят полный путь от Mini App до настоящего агента.
+SQLite, the project model, request IDs, events, states, and the Codex adapter. Launching, responding, approving, cancelling, and resuming a supported session all work end to end, from the Mini App to a real agent.
 
-Готовность: закрытие телефона не отменяет задачу; повтор команды не создаёт второй запуск; неоднозначная авария отображается как `recovery_required`.
+Done when: closing the phone does not cancel a task; repeating a command does not create a second launch; an ambiguous crash is shown as `recovery_required`.
 
-### Этап 3. Полный интерфейс и выпуск
+### Stage 3. Full interface and release
 
-Экраны устройств, проектов, сессий и результатов; несколько ПК; выбор сборки; установочные проверки; поддерживаемая матрица Telegram/ОС; ограничение ресурсов и диагностика.
+Device, project, session, and result screens; multiple PCs; build selection; installation checks; the supported Telegram/OS matrix; resource limits and diagnostics.
 
-Готовность: новый пользователь проходит установку и привязку без собственного Bot Token и сервера, затем выполняет реальную задачу с телефона.
+Done when: a new user completes installation and pairing without their own Bot Token or server, and then runs a real task from their phone.
 
-## 13. Приёмочные проверки v0.1
+## 13. v0.1 acceptance checks
 
-| Сценарий | Ожидаемый результат |
+| Scenario | Expected result |
 | --- | --- |
-| Установка | Сборка выбранной платформы запускается без установленного Go |
-| Привязка | Доступ появляется только после проверки ключей и подтверждения на ПК |
-| Неизвестный телефон | Нельзя читать проекты и запускать задачи |
-| Подмена ПК или relay-регистрации | Pin/challenge-проверка отклоняет подмену; действующий daemon не вытесняется |
-| Истёкшее приглашение | Повтор не даёт доступа |
-| Поддельное или просроченное initData | Проверка Telegram identity отклоняет подключение |
-| Отзыв | Прекращается действующий доступ и отклоняется повторный вход |
-| Отсутствующий Codex | Понятная ошибка; ложного состояния running нет |
-| Реальная задача | Ответ и события получены от локального Codex |
-| Подтверждение | Решение относится только к запрошенной операции; повтор не применим к другой |
-| Повтор task.start | Возвращается прежняя задача, в том числе при потере первого ответа |
-| Конфликт request ID | Изменённое содержимое отклоняется |
-| Закрытие Mini App | Работа на ПК продолжается; после открытия доступен фактический результат |
-| Смена сети | Новое защищённое подключение восстанавливает прежнюю сессию |
-| Перезапуск relay | Локальные задачи и история сохраняются; клиенты аутентифицируются заново |
-| Авария daemon | Состояние сверяется; неопределённый запуск не повторяется автоматически |
-| Сбой между запуском и записью | Не появляется ложная гарантия exactly once или успеха |
-| Остановка | cancelled отображается после подтверждённой остановки |
-| ПК offline | Задача не считается принятой облаком |
-| Медленный клиент | Очереди ограничены, память не растёт без ограничений |
-| Опасный вывод агента | Содержимое не исполняется как HTML/JavaScript |
-| Защищённое хранилище недоступно | Нет скрытого сохранения постоянного секрета в localStorage |
-| Логи | Промпты, результаты и приватные ключи отсутствуют в серверных логах |
-| Новый телефон | Требуется новая привязка, один Telegram-аккаунт доступа не даёт |
+| Installation | The build for the selected platform runs without Go installed |
+| Pairing | Access appears only after key verification and confirmation on the PC |
+| Unknown phone | Cannot read projects or start tasks |
+| Spoofed PC or relay registration | The pin/challenge check rejects the spoof; a running daemon is not evicted |
+| Expired invitation | A retry grants no access |
+| Forged or stale initData | Telegram identity verification rejects the connection |
+| Revocation | Active access ends and a repeat login is rejected |
+| Codex missing | A clear error; no false `running` state |
+| Real task | The response and events come from the local Codex |
+| Approval | A decision applies only to the requested operation; a repeat does not apply to another |
+| Repeated task.start | The original task is returned, including when the first response was lost |
+| Request ID conflict | Changed content is rejected |
+| Closing the Mini App | Work continues on the PC; after reopening, the actual result is available |
+| Network change | A new secure connection restores the previous session |
+| Relay restart | Local tasks and history survive; clients authenticate again |
+| Daemon crash | State is reconciled; an indeterminate launch is not retried automatically |
+| Failure between launch and write | No false guarantee of exactly-once or of success |
+| Stop | `cancelled` is shown after a confirmed stop |
+| PC offline | The task is not treated as accepted by the cloud |
+| Slow client | Queues are bounded, memory does not grow without limit |
+| Dangerous agent output | Content is not executed as HTML/JavaScript |
+| Secure storage unavailable | No hidden persistence of a long-term secret in localStorage |
+| Logs | Prompts, results, and private keys are absent from server logs |
+| New phone | New pairing is required; a Telegram account alone grants no access |
 
-Проверки выполняются на реальных Telegram Android/iOS и каждой заявленной платформе ПК. Отдельно проверяются пути с пробелами и Unicode, права файлов, остановка дочерних процессов и повторный запуск приложения. Для аварийных сценариев используются управляемые точки отказа.
+The checks are run on real Telegram Android/iOS clients and on every declared PC platform. Paths with spaces and Unicode, file permissions, stopping child processes, and restarting the application are verified separately. Controlled fault injection points are used for the crash scenarios.
 
-## 14. Проверки, которые остаются перед выпуском
+## 14. Checks still outstanding before release
 
-Архитектура выбрана; следующие пункты являются техническими проверками реализации:
+The architecture is settled; the following are technical verification items for the implementation:
 
-- конкретная Noise-библиотека, версия и совместимость native/WASM;
-- окончательные форматы QR, подписываемых структур и Noise prologue;
-- доступность защищённого хранилища и поведение WebView по матрице Telegram;
-- поддерживаемая версия Codex и восстановление thread после аварии;
-- реальные sandbox-возможности на каждой ОС;
-- пределы активных каналов, очередей, кадров и общая вместимость Free;
-- правила допуска публичного relay и защита от массовых регистраций;
-- подпись, упаковка и безопасное обновление каждого публикуемого бинарника.
+- the specific Noise library, its version, and native/WASM compatibility;
+- the final formats of the QR code, the signed structures, and the Noise prologue;
+- secure storage availability and WebView behaviour across the Telegram matrix;
+- the supported Codex version and thread recovery after a crash;
+- actual sandbox capabilities on each OS;
+- limits on active channels, queues, and frames, and overall Free-tier capacity;
+- admission rules for the public relay and protection against mass registrations;
+- signing, packaging, and safe updating of every published binary.
 
-v0.1 считается готовой после прохождения приёмочных сценариев на объявленной матрице платформ. До этого документ не является аудитом безопасности или отчётом о работоспособности.
+v0.1 is considered ready once the acceptance scenarios pass on the declared platform matrix. Until then this document is not a security audit or a report on a working system.
 
-## 15. Работа с main
+## 15. Working with main
 
-Работа ведётся в существующем репозитории `sergey-telpuk/agentik` и ветке `main`. Перед изменениями проверяются инструкции репозитория, актуальная вершина ветки и чужие изменения. В коммит включаются только относящиеся к задаче файлы; секреты, локальные состояния и служебные настройки окружения не добавляются.
+Work is done in the existing repository `sergey-telpuk/agentik` and the `main` branch. Before making changes, the repository instructions, the current branch tip, and other people's changes are checked. A commit includes only the files relevant to the task; secrets, local state, and environment-specific settings are not added.
 
-Push выполняется обычным fast-forward. Если main изменился, новые изменения сначала читаются и объединяются без перезаписи чужой работы. Force push не используется. Принудительное изменение правил защиты ветки не входит в рабочий процесс.
+Pushes are ordinary fast-forwards. If main has moved, the new changes are first read and merged without overwriting anyone else's work. Force push is not used. Overriding branch protection rules is not part of the workflow.
 
-## 16. Источники
+## 16. Sources
 
-Публичные возможности и тарифы проверены 27 ноября 2026 года. Проектные решения Agentik в этом документе отделены от свойств платформ и требуют собственной реализации и испытаний.
+Public capabilities and pricing were checked on 27 November 2026. Agentik's own design decisions in this document are separate from platform properties and require their own implementation and testing.
 
-- **S1. Telegram Mini Apps:** запуск, initData, проверка Ed25519 третьей стороной, QR, downloadFile, DeviceStorage и SecureStorage. <https://core.telegram.org/bots/webapps>
-- **S2. Telegram Mini Apps API:** события и ограничения платформ, включая недоступность отдельных возможностей. <https://core.telegram.org/api/bots/webapps>
-- **S3. Cloudflare Durable Objects WebSockets:** Hibernation API, сохранение соединений и состояние между активациями. <https://developers.cloudflare.com/durable-objects/best-practices/websockets/>
-- **S4. Cloudflare Durable Objects pricing:** Free-квоты, учёт WebSocket-сообщений и поведение при превышении. <https://developers.cloudflare.com/durable-objects/platform/pricing/>
-- **S5. Cloudflare Workers pricing и Static Assets:** <https://developers.cloudflare.com/workers/platform/pricing/>; <https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/>
-- **S6. Noise Protocol Framework:** handshake XX, транспортное шифрование и обязанности приложения. <https://noiseprotocol.org/noise.html>
-- **S7. Codex App Server:** локальный интерфейс, stdio, threads, turns и события. <https://developers.openai.com/codex/app-server>
-
+- **S1. Telegram Mini Apps:** launching, initData, third-party Ed25519 verification, QR, downloadFile, DeviceStorage, and SecureStorage. <https://core.telegram.org/bots/webapps>
+- **S2. Telegram Mini Apps API:** events and platform limitations, including features unavailable on some clients. <https://core.telegram.org/api/bots/webapps>
+- **S3. Cloudflare Durable Objects WebSockets:** Hibernation API, connection persistence, and state between activations. <https://developers.cloudflare.com/durable-objects/best-practices/websockets/>
+- **S4. Cloudflare Durable Objects pricing:** free quotas, WebSocket message accounting, and behaviour on exceeding them. <https://developers.cloudflare.com/durable-objects/platform/pricing/>
+- **S5. Cloudflare Workers pricing and Static Assets:** <https://developers.cloudflare.com/workers/platform/pricing/>; <https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/>
+- **S6. Noise Protocol Framework:** the XX handshake, transport encryption, and application responsibilities. <https://noiseprotocol.org/noise.html>
+- **S7. Codex App Server:** the local interface, stdio, threads, turns, and events. <https://developers.openai.com/codex/app-server>
