@@ -56,6 +56,8 @@ const MAX_RELAY_URL_LENGTH = 512;
 const INDEX_KEY = "agentik_pins_index";
 const PROBE_KEY = "agentik_probe";
 const RECORD_PREFIX = "agentik_pin_";
+const CORRUPT_INDEX_MESSAGE =
+  'the device index is corrupt; open Settings and use "Clear local pinned data" to reset it';
 
 function ok<T>(value: T): StoreResult<T> {
   return { ok: true, value };
@@ -218,6 +220,50 @@ export class PinnedDeviceStore {
     }
   }
 
+  /**
+   * Recovery path: forgets every pin on this phone without trusting the
+   * stored index, so it works when `list()` reports the index as corrupt.
+   *
+   * The index is overwritten with an empty list first, which is what makes
+   * the store usable again. Records that a still-readable index names are then
+   * removed on a best-effort basis; a record left behind is unreachable (it is
+   * only ever read through the index) and is overwritten by a later pin of the
+   * same device. Only the pin index and pin records are touched, never the
+   * phone identity or any other key, and nothing secret is written.
+   */
+  async resetAll(): Promise<StoreResult<null>> {
+    const backend = this.#backend;
+    // Nothing is ever persisted without a backend, so there is nothing to reset.
+    if (backend === null) return ok(null);
+    const known = await this.#enumerateRecordIds(backend);
+    try {
+      await backend.set(INDEX_KEY, "[]");
+    } catch {
+      return err("storage_failed", "resetting the device index failed");
+    }
+    for (const id of known) {
+      try {
+        await backend.remove(RECORD_PREFIX + id);
+      } catch {
+        // Orphan records are harmless: they are only read via the index.
+      }
+    }
+    return ok(null);
+  }
+
+  /** Device ids named by the stored index, read leniently. Never throws. */
+  async #enumerateRecordIds(backend: KeyValueBackend): Promise<string[]> {
+    try {
+      const raw = await backend.get(INDEX_KEY);
+      if (raw === null) return [];
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((id): id is string => typeof id === "string" && decodeBase32(id)?.length === 32);
+    } catch {
+      return [];
+    }
+  }
+
   async #readIndex(backend: KeyValueBackend): Promise<StoreResult<string[]>> {
     const raw = await backend.get(INDEX_KEY);
     if (raw === null) return ok([]);
@@ -225,14 +271,14 @@ export class PinnedDeviceStore {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return err("corrupt_record", "the device index is corrupt");
+      return err("corrupt_record", CORRUPT_INDEX_MESSAGE);
     }
     if (
       !Array.isArray(parsed) ||
       parsed.length > MAX_PINNED_DEVICES ||
       !parsed.every((id) => typeof id === "string" && decodeBase32(id)?.length === 32)
     ) {
-      return err("corrupt_record", "the device index is corrupt");
+      return err("corrupt_record", CORRUPT_INDEX_MESSAGE);
     }
     return ok(parsed as string[]);
   }

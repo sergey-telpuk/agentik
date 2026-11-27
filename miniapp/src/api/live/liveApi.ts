@@ -442,12 +442,9 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
       tasks.clear();
       lastSeq.clear();
       requests.clear();
-      const listed = await options.store.list();
-      if (!listed.ok) return fail(storeErrorCode(listed.code), listed.message);
-      for (const device of listed.value) {
-        const removed = await options.store.remove(device.deviceId);
-        if (!removed.ok) return fail(storeErrorCode(removed.code), removed.message);
-      }
+      // resetAll does not validate the stored index, so this also recovers a corrupt one.
+      const reset = await options.store.resetAll();
+      if (!reset.ok) return fail(storeErrorCode(reset.code), reset.message);
       return ok(null);
     },
   };

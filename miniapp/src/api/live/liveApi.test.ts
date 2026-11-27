@@ -581,4 +581,46 @@ describe("live AgentikApi: tasks over the inner protocol", () => {
     const afterClear = await api.listProjects(id);
     expect(!afterClear.ok && afterClear.error.code).toBe("not_connected");
   });
+
+  it("clears every pin of a valid store", async () => {
+    const f = await fixture();
+    await pinConfirmed(f);
+    const other = await f.store.pin({
+      ...pinnedDeviceFromInvitation(f.invitation, NOW_S),
+      deviceId: "a".repeat(52),
+    });
+    expect(other.ok).toBe(true);
+    const api = liveApi(f, {
+      createRelayClient: attachingRelay().createRelayClient,
+      secureChannel: plainDaemon(paired(() => undefined)).secureChannel,
+    });
+    const before = await api.listComputers();
+    expect(before.ok && before.value).toHaveLength(2);
+
+    expect((await api.clearLocalData()).ok).toBe(true);
+    const after = await api.listComputers();
+    expect(after.ok && after.value).toEqual([]);
+    expect(f.backend.data.get("agentik_pins_index")).toBe("[]");
+    expect([...f.backend.data.keys()].filter((k) => k.startsWith("agentik_pin_"))).toEqual([]);
+  });
+
+  it("clears local data and allows pairing again when the pinned device index is corrupt", async () => {
+    const f = await fixture();
+    f.backend.data.set("agentik_phone_identity", "keep-me");
+    f.backend.data.set("agentik_pins_index", "{not json");
+    const api = liveApi(f, {
+      createRelayClient: attachingRelay().createRelayClient,
+      secureChannel: plainDaemon(paired(() => undefined)).secureChannel,
+    });
+    const listed = await api.listComputers();
+    expect(!listed.ok && listed.error.message).toContain("Clear local pinned data");
+    const blocked = await api.pairComputer(f.invitation);
+    expect(!blocked.ok && blocked.error.message).toContain("Clear local pinned data");
+
+    expect((await api.clearLocalData()).ok).toBe(true);
+    const computers = await api.listComputers();
+    expect(computers.ok && computers.value).toEqual([]);
+    expect(f.backend.data.get("agentik_phone_identity")).toBe("keep-me");
+    expect((await api.pairComputer(f.invitation)).ok).toBe(true);
+  });
 });

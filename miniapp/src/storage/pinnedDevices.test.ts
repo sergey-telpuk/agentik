@@ -112,6 +112,83 @@ describe("PinnedDeviceStore: pinning", () => {
     expect(await store.list()).toMatchObject({ ok: false, code: "corrupt_record" });
   });
 
+  it("tells the user how to recover from a corrupt index", async () => {
+    const backend = new MemoryBackend();
+    const store = await PinnedDeviceStore.open({ secure: backend, device: null });
+    backend.data.set("agentik_pins_index", "{not json");
+    const listed = await store.list();
+    expect(listed).toMatchObject({ ok: false, code: "corrupt_record" });
+    expect(!listed.ok && listed.message).toContain("Clear local pinned data");
+  });
+
+  it("resetAll recovers from a corrupt index and a new pin can be stored", async () => {
+    for (const corrupt of ["{not json", '{"a":1}', '["not-a-device-id"]', "null"]) {
+      const backend = new MemoryBackend();
+      const store = await PinnedDeviceStore.open({ secure: backend, device: null });
+      backend.data.set("agentik_pins_index", corrupt);
+      expect(await store.list()).toMatchObject({ ok: false, code: "corrupt_record" });
+      expect(await store.pin(device())).toMatchObject({ ok: false, code: "corrupt_record" });
+
+      expect(await store.resetAll()).toEqual({ ok: true, value: null });
+      expect(backend.data.get("agentik_pins_index")).toBe("[]");
+      expect(await store.list()).toEqual({ ok: true, value: [] });
+      expect((await store.pin(device())).ok).toBe(true);
+      const listed = await store.list();
+      expect(listed.ok && listed.value).toEqual([device()]);
+    }
+  });
+
+  it("resetAll still overwrites an index that cannot be read", async () => {
+    const backend = new MemoryBackend();
+    const store = await PinnedDeviceStore.open({ secure: backend, device: null });
+    backend.data.set("agentik_pins_index", "{not json");
+    backend.failGet = true;
+    expect(await store.resetAll()).toEqual({ ok: true, value: null });
+    backend.failGet = false;
+    expect(await store.list()).toEqual({ ok: true, value: [] });
+  });
+
+  it("resetAll removes the records of a valid index and leaves other keys alone", async () => {
+    const backend = new MemoryBackend();
+    const store = await PinnedDeviceStore.open({ secure: backend, device: null });
+    await store.pin(device());
+    await store.pin(device({ deviceId: deviceIdFor(2) }));
+    backend.data.set("agentik_phone_identity", "keep-me");
+    backend.setCalls.length = 0;
+
+    expect(await store.resetAll()).toEqual({ ok: true, value: null });
+    expect(await store.list()).toEqual({ ok: true, value: [] });
+    expect([...backend.data.keys()].sort()).toEqual(["agentik_phone_identity", "agentik_pins_index"]);
+    expect(backend.data.get("agentik_phone_identity")).toBe("keep-me");
+    // The only write is the empty index: no secret and no record is written.
+    expect(backend.setCalls).toEqual(["agentik_pins_index"]);
+  });
+
+  it("resetAll removes records named by a malformed but parseable index", async () => {
+    const backend = new MemoryBackend();
+    const store = await PinnedDeviceStore.open({ secure: backend, device: null });
+    await store.pin(device());
+    const extra = Array.from({ length: MAX_PINNED_DEVICES }, (_, i) => deviceIdFor(i + 10));
+    backend.data.set("agentik_pins_index", JSON.stringify([device().deviceId, ...extra]));
+    expect(await store.list()).toMatchObject({ ok: false, code: "corrupt_record" });
+
+    expect((await store.resetAll()).ok).toBe(true);
+    expect(backend.data.has(`agentik_pin_${device().deviceId}`)).toBe(false);
+    expect(await store.list()).toEqual({ ok: true, value: [] });
+  });
+
+  it("resetAll reports only a failed index write, and succeeds without a backend", async () => {
+    const backend = new MemoryBackend();
+    const store = await PinnedDeviceStore.open({ secure: backend, device: null });
+    backend.data.set("agentik_pins_index", "{not json");
+    backend.failSet = true;
+    expect(await store.resetAll()).toMatchObject({ ok: false, code: "storage_failed" });
+    expect(backend.data.get("agentik_pins_index")).toBe("{not json");
+
+    const none = await PinnedDeviceStore.open({ secure: null, device: null });
+    expect(await none.resetAll()).toEqual({ ok: true, value: null });
+  });
+
   it("reports a storage failure without throwing", async () => {
     const backend = new MemoryBackend();
     const store = await PinnedDeviceStore.open({ secure: backend, device: null });
