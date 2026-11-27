@@ -908,6 +908,52 @@ describe("live AgentikApi: agent selection and conversation listing", () => {
     });
   });
 
+  it("continues a session with a chosen model and maps the model of each turn", async () => {
+    const { api, id, daemon } = await ready((frame) =>
+      frame.method === "task.start"
+        ? {
+            result: {
+              task: task({ task_id: "task-follow", session_id: "sess-1", state: "starting", model: (frame.params["model"] as string | undefined) ?? "" }),
+              deduplicated: false,
+            },
+          }
+        : undefined,
+    );
+
+    const chosen = await api.startTask(id, {
+      projectId: "proj-1",
+      agent: "codex",
+      prompt: "And now?",
+      sessionId: "sess-1",
+      model: "small",
+      requestId: "req-follow-m",
+    });
+    expect(chosen.ok && chosen.value.model).toBe("small");
+    expect(daemon.requests.find((r) => r.request_id === "req-follow-m")?.params).toEqual({
+      project_id: "proj-1",
+      session_id: "sess-1",
+      agent: "codex",
+      prompt: "And now?",
+      agent_id: "codex",
+      model: "small",
+    });
+
+    const plain = await api.startTask(id, {
+      projectId: "proj-1",
+      agent: "codex",
+      prompt: "And now?",
+      sessionId: "sess-1",
+      requestId: "req-follow-d",
+    });
+    expect(plain.ok && plain.value.model).toBeUndefined();
+    expect(daemon.requests.find((r) => r.request_id === "req-follow-d")?.params).toEqual({
+      project_id: "proj-1",
+      session_id: "sess-1",
+      agent: "codex",
+      prompt: "And now?",
+    });
+  });
+
   it("treats the same request id with another model as a conflict without asking the computer", async () => {
     const { api, id, daemon } = await ready((frame) =>
       frame.method === "task.start" ? { result: { task: task({ state: "starting" }), deduplicated: false } } : undefined,

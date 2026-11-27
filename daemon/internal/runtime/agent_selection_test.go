@@ -302,3 +302,117 @@ func TestRequestWithoutModelKeepsItsPreModelHash(t *testing.T) {
 		t.Fatalf("agent and agent_id must be interchangeable for dedup: %+v", retry)
 	}
 }
+
+// continueSession starts a first turn and returns it once it has completed.
+func continueSession(t *testing.T, h *wireHarness, pc *phoneClient, m *modelAdapter) runtime.TaskView {
+	t.Helper()
+	first, _ := h.call(pc, "req-c1", "task.start", map[string]any{
+		"project_id": "proj-a", "agent_id": "codex", "model": "big", "prompt": "one",
+	})
+	if !first.OK {
+		t.Fatalf("first turn failed: %+v", first.Error)
+	}
+	one := decodeInto[runtime.TaskResult](t, first.Result)
+	waitTaskCompleted(t, pc, one.Task.TaskID)
+	return one.Task
+}
+
+func TestContinuationPassesChosenModelToTurnStart(t *testing.T) {
+	m := newModelAdapter("big", "small")
+	h, pc := selectionHarness(t, m, "")
+	one := continueSession(t, h, pc, m)
+
+	resp, _ := h.call(pc, "req-c2", "task.start", map[string]any{
+		"project_id": "proj-a", "session_id": one.SessionID, "agent_id": "codex", "model": "small", "prompt": "two",
+	})
+	if !resp.OK {
+		t.Fatalf("continuation failed: %+v", resp.Error)
+	}
+	two := decodeInto[runtime.TaskResult](t, resp.Result)
+	if two.Task.SessionID != one.SessionID || two.Task.Model != "small" {
+		t.Fatalf("continuation lost the session or model: %+v", two.Task)
+	}
+	waitTaskCompleted(t, pc, two.Task.TaskID)
+	if got := m.startedModels(); len(got) != 2 || got[0] != "big" || got[1] != "small" {
+		t.Fatalf("turns started with models %v, want [big small]", got)
+	}
+
+	// Each turn keeps the model it ran with.
+	opened, _ := h.call(pc, "req-c-open", "session.open", map[string]any{
+		"project_id": "proj-a", "session_id": one.SessionID,
+	})
+	open := decodeInto[runtime.SessionOpenResult](t, opened.Result)
+	if len(open.Tasks) != 2 || open.Tasks[0].Model != "big" || open.Tasks[1].Model != "small" {
+		t.Fatalf("session.open lost per-turn models: %+v", open.Tasks)
+	}
+}
+
+func TestContinuationRejectsUnknownModelWithoutLaunching(t *testing.T) {
+	m := newModelAdapter("big", "small")
+	h, pc := selectionHarness(t, m, "")
+	one := continueSession(t, h, pc, m)
+
+	resp, _ := h.call(pc, "req-c2", "task.start", map[string]any{
+		"project_id": "proj-a", "session_id": one.SessionID, "agent_id": "codex", "model": "gpt-nope", "prompt": "two",
+	})
+	if resp.OK || resp.Error == nil || resp.Error.Code != "unknown_model" || !strings.Contains(resp.Error.Message, "gpt-nope") {
+		t.Fatalf("expected unknown_model, got %+v", resp)
+	}
+	if n := m.launchCount.Load(); n != 1 {
+		t.Fatalf("a rejected continuation launched the agent: %d launches", n)
+	}
+	var tasks int
+	if err := h.db.SQL().QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&tasks); err != nil || tasks != 1 {
+		t.Fatalf("rejected continuation left %d tasks (err=%v)", tasks, err)
+	}
+}
+
+func TestContinuationWithoutModelKeepsAgentDefault(t *testing.T) {
+	m := newModelAdapter("big", "small")
+	h, pc := selectionHarness(t, m, "")
+	one := continueSession(t, h, pc, m)
+
+	resp, _ := h.call(pc, "req-c2", "task.start", map[string]any{
+		"project_id": "proj-a", "session_id": one.SessionID, "agent_id": "codex", "prompt": "two",
+	})
+	if !resp.OK {
+		t.Fatalf("continuation failed: %+v", resp.Error)
+	}
+	two := decodeInto[runtime.TaskResult](t, resp.Result)
+	waitTaskCompleted(t, pc, two.Task.TaskID)
+	if two.Task.Model != "" {
+		t.Fatalf("default model must stay empty, got %q", two.Task.Model)
+	}
+	if got := m.startedModels(); len(got) != 2 || got[1] != "" {
+		t.Fatalf("continuation without a model must send no override, got %v", got)
+	}
+}
+
+func TestContinuationModelIsPartOfIdempotencyHash(t *testing.T) {
+	m := newModelAdapter("big", "small")
+	h, pc := selectionHarness(t, m, "")
+	one := continueSession(t, h, pc, m)
+
+	params := map[string]any{
+		"project_id": "proj-a", "session_id": one.SessionID, "agent_id": "codex", "model": "small", "prompt": "two",
+	}
+	resp, _ := h.call(pc, "req-c2", "task.start", params)
+	if !resp.OK {
+		t.Fatalf("continuation failed: %+v", resp.Error)
+	}
+	two := decodeInto[runtime.TaskResult](t, resp.Result)
+	waitTaskCompleted(t, pc, two.Task.TaskID)
+
+	retry, _ := h.call(pc, "req-c2", "task.start", params)
+	if !retry.OK || !decodeInto[runtime.TaskResult](t, retry.Result).Deduplicated {
+		t.Fatalf("identical continuation must deduplicate: %+v", retry)
+	}
+	params["model"] = "big"
+	other, _ := h.call(pc, "req-c2", "task.start", params)
+	if other.OK || other.Error == nil || other.Error.Code != "request_id_conflict" {
+		t.Fatalf("another model under the same request id must conflict, got %+v", other)
+	}
+	if got := m.startedModels(); len(got) != 2 {
+		t.Fatalf("retries must not launch again, got %v", got)
+	}
+}

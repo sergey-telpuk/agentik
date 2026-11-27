@@ -383,6 +383,24 @@ func TestStartTurnPassesSelectedModel(t *testing.T) {
 	}
 }
 
+func TestResumedThreadPassesSelectedModelToTurnStart(t *testing.T) {
+	run := func(model string) TurnResult {
+		turn, err := fakeAdapter("echo_model").StartTurn(context.Background(), StartTurnRequest{
+			ProjectRoot: t.TempDir(), ThreadID: "thr_existing", Prompt: "again", Model: model,
+		}, TurnCallbacks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return turn.Wait()
+	}
+	if res := run("m-small"); res.ThreadID != "thr_existing" || res.ResultText != "model=m-small" {
+		t.Fatalf("resumed thread lost the selected model: %+v", res)
+	}
+	if res := run(""); res.ThreadID != "thr_existing" || res.ResultText != "model=" {
+		t.Fatalf("resumed thread without a model must send none: %+v", res)
+	}
+}
+
 // TestRealCodexDiagnoseAndInitialize verifies the adapter against the locally
 // installed codex CLI when AGENTIK_TEST_REAL_CODEX=1 is set.
 func TestRealCodexDiagnoseAndInitialize(t *testing.T) {

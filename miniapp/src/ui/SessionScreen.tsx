@@ -8,10 +8,11 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { canRequestCancel, isFinalState } from "../api/taskState";
-import { MAX_PROMPT_LENGTH, type AgentikApi, type TaskSummary } from "../api/types";
+import { MAX_PROMPT_LENGTH, type AgentikApi, type AgentModel, type TaskSummary } from "../api/types";
 import { ApprovalSheet } from "./ApprovalSheet";
 import { sentence } from "./format";
 import { ConfirmDialog, Notice, Page, SkeletonList, useBusy } from "./kit";
+import { ModelSelect, knownModel } from "./ModelSelect";
 import { Turn } from "./Turn";
 
 interface Props {
@@ -77,6 +78,10 @@ export function SessionScreen({
   // One id per submitted content: retrying after a lost response reuses it,
   // so the computer returns the same turn instead of starting a second one.
   const [request, setRequest] = useState<{ id: string; content: string } | null>(null);
+  // The agent's models, for the chip in the composer. Empty hides the chip.
+  const [models, setModels] = useState<readonly AgentModel[]>([]);
+  // The model picked in the chip; null follows the model of the last turn.
+  const [picked, setPicked] = useState<string | null>(null);
   const [sheetFor, setSheetFor] = useState<string | null>(null);
   const [confirmStop, setConfirmStop] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
@@ -103,6 +108,18 @@ export function SessionScreen({
       cancelled = true;
     };
   }, [api, computerId, projectId, sessionId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.listAgents(computerId).then((result) => {
+      if (cancelled || !result.ok) return;
+      const codex = result.value.find((a) => a.id === "codex");
+      setModels(codex?.status === "available" ? (codex.models ?? []) : []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, computerId]);
 
   const onTask = useCallback((task: TaskSummary) => {
     setLatest((previous) => (previous[task.id] === task ? previous : { ...previous, [task.id]: task }));
@@ -134,13 +151,18 @@ export function SessionScreen({
     }
   }, [pending]);
 
+  // What the chip shows and the next message uses: the pick, else the model of
+  // the last turn, else the agent's default (empty: no override is sent).
+  const lastModel = tasks[tasks.length - 1]?.model ?? "";
+  const chosenModel = knownModel(models, picked ?? lastModel);
+
   const trimmed = draft.trim();
   const tooLong = trimmed.length > MAX_PROMPT_LENGTH;
   const loaded = turns !== null;
   const canSend = loaded && trimmed !== "" && !tooLong && active === null && !sending;
 
   async function send(): Promise<void> {
-    const content = JSON.stringify([sessionId, trimmed]);
+    const content = JSON.stringify([sessionId, trimmed, chosenModel]);
     const id = request !== null && request.content === content ? request.id : newRequestId();
     setRequest({ id, content });
     const result = await api.startTask(computerId, {
@@ -149,6 +171,7 @@ export function SessionScreen({
       prompt: trimmed,
       requestId: id,
       sessionId,
+      ...(chosenModel === "" ? {} : { model: chosenModel }),
     });
     if (result.ok) {
       stick.current = true;
@@ -225,9 +248,22 @@ export function SessionScreen({
           aria-invalid={tooLong}
           disabled={sending}
         />
-        <button type="submit" className="button button-primary composer-send" disabled={!canSend} aria-busy={sending}>
-          {sending ? "Sending…" : "Send"}
-        </button>
+        <div className="composer-actions">
+          {models.length > 0 && (
+            <ModelSelect
+              className="model-chip"
+              compact
+              models={models}
+              value={chosenModel}
+              onChange={setPicked}
+              disabled={active !== null || sending}
+              ariaLabel="Model for the next message"
+            />
+          )}
+          <button type="submit" className="button button-primary composer-send" disabled={!canSend} aria-busy={sending}>
+            {sending ? "Sending…" : "Send"}
+          </button>
+        </div>
       </form>
       <p id={counterId} className={tooLong ? "hint hint-bad" : "hint"}>
         {active !== null
