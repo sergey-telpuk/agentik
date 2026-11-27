@@ -155,8 +155,8 @@ export class AgentikRpcClient {
     return this.request("agent.list", {});
   }
 
-  listSessions(projectId?: string): Promise<SessionListResult> {
-    return this.request("session.list", projectId === undefined ? {} : { project_id: projectId });
+  listSessions(projectId?: string, options: { readonly timeoutMs?: number } = {}): Promise<SessionListResult> {
+    return this.request("session.list", projectId === undefined ? {} : { project_id: projectId }, options);
   }
 
   openSession(params: SessionOpenParams): Promise<SessionOpenResult> {

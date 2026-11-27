@@ -310,6 +310,18 @@ describe("conversations", () => {
     expect(second.changes).toEqual([{ path: "relay/src/index.test.ts", additions: 7, deletions: 0 }]);
   });
 
+  it("lists the seeded conversation as one row with its first message and turn count", async () => {
+    const { api } = await setup("happy");
+    await connect(api, MAIN);
+    const listing = value(await api.listConversations(MAIN, "proj_agentik"));
+    expect(listing.source).toBe("computer");
+    expect(listing.warning).toBeNull();
+    const seeded = listing.conversations.find((c) => c.title === "Add a health check endpoint to the relay");
+    expect(seeded).toMatchObject({ turns: 3, latestState: "succeeded", projectId: "proj_agentik" });
+    expect(new Set(listing.conversations.map((c) => c.sessionId)).size).toBe(listing.conversations.length);
+    expect(value(await api.listConversations(MAIN, "proj_unknown")).conversations).toEqual([]);
+  });
+
   it("continues a conversation in the same session and refuses an unknown one", async () => {
     const { api } = await setup("happy");
     await connect(api, MAIN);

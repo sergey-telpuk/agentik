@@ -236,6 +236,37 @@ export interface SessionView {
   readonly truncated: boolean;
 }
 
+/** One row of the project screen: a conversation with its first message as title. */
+export interface ConversationSummary {
+  readonly sessionId: string;
+  readonly projectId: string;
+  readonly agent: AgentId;
+  /** What the conversation is about: its first message. Plain text, may be shortened. */
+  readonly title: string;
+  /** The state of the newest turn; it decides the status shown. */
+  readonly latestState: TaskState;
+  /** Number of turns (messages sent) in the conversation. */
+  readonly turns: number;
+  /** Milliseconds since the epoch of the newest activity. */
+  readonly updatedAt: number;
+}
+
+/** The conversations of one project, newest activity first. */
+export interface ConversationListing {
+  readonly conversations: readonly ConversationSummary[];
+  /**
+   * `computer` when the computer's own list was used (it is the source of
+   * truth, so conversations from earlier runs are included). `local` when the
+   * computer cannot list conversations (an older version) or the request
+   * failed, so only conversations this phone knows in the current run appear.
+   */
+  readonly source: "computer" | "local";
+  /** True when the computer left older conversations out of its answer. */
+  readonly truncated: boolean;
+  /** Why the computer's list is missing although it should have been available, or null. */
+  readonly warning: string | null;
+}
+
 export interface RespondApprovalInput {
   readonly taskId: string;
   readonly approvalId: string;
@@ -322,6 +353,12 @@ export interface AgentikApi {
   listProjects(computerId: string): Promise<ApiResult<Project[]>>;
   listAgents(computerId: string): Promise<ApiResult<Agent[]>>;
   listTasks(computerId: string, projectId: string): Promise<ApiResult<TaskSummary[]>>;
+  /**
+   * The conversations of a project. The computer's list is merged with what
+   * this phone knows from the current run, keyed by session id; nothing is
+   * stored on the phone.
+   */
+  listConversations(computerId: string, projectId: string): Promise<ApiResult<ConversationListing>>;
   getTask(computerId: string, taskId: string): Promise<ApiResult<TaskSummary>>;
   /** The turns of one conversation, oldest first. */
   getSession(computerId: string, projectId: string, sessionId: string): Promise<ApiResult<SessionView>>;

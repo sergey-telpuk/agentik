@@ -201,6 +201,9 @@ describe("App", () => {
           return { result: { projects: [{ project_id: "repo", name: "agentik", agents: ["codex"] }] } };
         case "agent.list":
           return { result: { agents: [{ name: "codex", available: true, authenticated: true, version: "0.160.0" }] } };
+        case "session.list":
+          // A computer that predates conversation listing.
+          return { error: { code: "bad_request", message: 'unknown method "session.list"' } };
         case "task.start":
           current = taskView("running", String(frame.params["prompt"]));
           return { result: { task: current } };
@@ -249,7 +252,7 @@ describe("App", () => {
 
     await click("agentik");
     await settle(() => has("No tasks started from this phone yet"));
-    expect(container.textContent).toContain("The computer cannot list earlier tasks yet");
+    expect(container.textContent).toContain("cannot list earlier conversations yet");
     await click("New task");
     await settle(() => has("Version 0.160.0"));
     await type("Fix bug");

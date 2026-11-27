@@ -13,6 +13,7 @@ import type { UntrustedInvitation } from "../../pairing/invitation";
 import { pinnedDeviceFromInvitation } from "../../pairing/pin";
 import type { PinnedDevice, PinnedDeviceStore, StoreErrorCode } from "../../storage/pinnedDevices";
 import type { TelegramRuntime } from "../../telegram/runtime";
+import { conversationsFromTasks, mergeConversations } from "../conversations";
 import { canRequestCancel, isFinalState, transition, type TaskState } from "../taskState";
 import {
   MAX_PROMPT_LENGTH,
@@ -29,6 +30,7 @@ import {
   type Computer,
   type ComputerStatus,
   type ConnectionState,
+  type ConversationListing,
   type Diagnostics,
   type FileChange,
   type Project,
@@ -643,6 +645,19 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
         .map((t) => t.summary())
         .sort((a, b) => b.createdAt - a.createdAt);
       return ok(tasks);
+    },
+
+    async listConversations(computerId, projectId) {
+      const record = await session(computerId);
+      if (!record.ok) return record;
+      const tasks = [...record.value.tasks.values()].filter((t) => t.projectId === projectId).map((t) => t.summary());
+      const listing: ConversationListing = {
+        conversations: mergeConversations([], conversationsFromTasks(tasks)),
+        source: "computer",
+        truncated: false,
+        warning: null,
+      };
+      return ok(listing);
     },
 
     async getTask(computerId, taskId) {

@@ -7,8 +7,12 @@
  * Pairing credentials stay in memory until the computer has seen them.
  *
  * Known gaps, each surfaced to the UI rather than faked:
- * - The computer has no `task.list`, so `listTasks` returns the tasks this
- *   phone started or opened since the app was opened (refreshed live).
+ * - `listTasks` returns only the tasks this phone started or opened since the
+ *   app was opened (refreshed live). `listConversations` is the project
+ *   screen's source: it asks the computer for its session list (`session.list`)
+ *   and merges it with those local tasks by session id. A computer without the
+ *   method keeps the local-only behaviour. Conversation text is held in memory
+ *   for the current run only and never persisted on the phone.
  * - The computer reports no display name, so computers are named from their id.
  * - Revoked/replaced/offline outcomes are remembered in memory only; pins
  *   persist just `unconfirmed`/`confirmed`.
@@ -24,6 +28,7 @@ import type { SecureChannelFactory } from "../../secure/seam";
 import type { PhoneIdentityStore } from "../../storage/phoneIdentity";
 import type { PinnedDevice, PinnedDeviceStore, StoreErrorCode } from "../../storage/pinnedDevices";
 import type { TelegramRuntime } from "../../telegram/runtime";
+import { conversationsFromTasks, mergeConversations } from "../conversations";
 import { isFinalState } from "../taskState";
 import {
   MAX_PROMPT_LENGTH,
@@ -32,6 +37,8 @@ import {
   type ApiResult,
   type Computer,
   type ComputerStatus,
+  type ConversationListing,
+  type ConversationSummary,
   type Diagnostics,
   type SessionView,
   type TaskEvent,
@@ -43,6 +50,9 @@ import {
   agentsFromInfo,
   apiErrorFrom,
   changesTaskState,
+  conversationFromSession,
+  isLegacySessionList,
+  isUnsupportedMethod,
   taskResultFromView,
   taskSummaryFromView,
   timelineEventFromSession,
@@ -69,6 +79,8 @@ export interface LiveApiOptions {
 export const DEFAULT_OFFLINE_GRACE_MS = 8000;
 export const DEFAULT_MAX_RELAY_ATTEMPTS = 4;
 const MAX_RESUME_PAGES = 20;
+/** A computer that never answers the session list must not hold the project screen for the full RPC timeout. */
+const LIST_TIMEOUT_MS = 10_000;
 
 interface KnownTask {
   readonly computerId: string;
@@ -115,6 +127,10 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
   const tasks = new Map<string, KnownTask>();
   const lastSeq = new Map<string, number>();
   const requests = new Map<string, string>();
+  /** The computer's own conversation rows seen in this run, by computer then session id. */
+  const computerConversations = new Map<string, Map<string, ConversationSummary>>();
+  /** Computers that answered `session.list` as unknown or legacy during their current connection. */
+  const listingUnsupported = new Set<string>();
 
   async function findPin(computerId: string): Promise<PinnedDevice | null> {
     const listed = await options.store.list();
@@ -140,6 +156,23 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
     if (known === undefined) tasks.set(view.task_id, { computerId, view });
     else known.view = view;
     return taskSummaryFromView(view, lastSeq.get(view.task_id) ?? 0);
+  }
+
+  /** Local tasks of a project with the unfinished ones re-read from the computer. */
+  async function refreshedLocalTasks(computerId: string, projectId: string, rpc: AgentikRpcClient): Promise<KnownTask[]> {
+    const mine = [...tasks.values()].filter((t) => t.computerId === computerId && t.view.project_id === projectId);
+    await Promise.all(
+      mine
+        .filter((t) => !isFinalState(taskSummaryFromView(t.view, 0).state))
+        .map(async (t) => {
+          try {
+            remember(computerId, (await rpc.getTask(t.view.task_id)).task);
+          } catch {
+            // Keep the last known state; the task screen reports errors.
+          }
+        }),
+    );
+    return mine;
   }
 
   function forgetTasksOf(computerId: string): void {
@@ -169,8 +202,51 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
     }
   }
 
+  type ComputerList =
+    | { readonly kind: "ok"; readonly rows: ConversationSummary[]; readonly truncated: boolean }
+    | { readonly kind: "unsupported" }
+    | { readonly kind: "failed"; readonly error: unknown };
+
+  /** Asks the computer for its sessions; every outcome is a value, never a throw. */
+  async function fetchComputerList(computerId: string, rpc: AgentikRpcClient, projectId?: string): Promise<ComputerList> {
+    if (listingUnsupported.has(computerId)) return { kind: "unsupported" };
+    try {
+      const listed = await rpc.listSessions(projectId, { timeoutMs: Math.min(options.rpcTimeoutMs ?? LIST_TIMEOUT_MS, LIST_TIMEOUT_MS) });
+      const sessions = Array.isArray(listed.sessions) ? listed.sessions : [];
+      if (isLegacySessionList(sessions)) {
+        listingUnsupported.add(computerId);
+        return { kind: "unsupported" };
+      }
+      const rows = sessions
+        .map(conversationFromSession)
+        .filter((row): row is ConversationSummary => row !== null && (projectId === undefined || row.projectId === projectId));
+      return { kind: "ok", rows, truncated: listed.sessions_truncated === true };
+    } catch (err) {
+      if (isUnsupportedMethod(err)) {
+        listingUnsupported.add(computerId);
+        return { kind: "unsupported" };
+      }
+      return { kind: "failed", error: err };
+    }
+  }
+
+  function rememberComputerRows(computerId: string, rows: readonly ConversationSummary[], projectId?: string): void {
+    const known = computerConversations.get(computerId) ?? new Map<string, ConversationSummary>();
+    for (const [id, row] of known) if (projectId === undefined || row.projectId === projectId) known.delete(id);
+    for (const row of rows) known.set(row.sessionId, row);
+    computerConversations.set(computerId, known);
+  }
+
   function onReady(computerId: string, rpc: AgentikRpcClient): void {
     for (const listener of readyListeners.get(computerId) ?? []) listener(rpc);
+    // Warm the conversation list as soon as the secure session is ready, so
+    // the project screen can show past conversations even if its own request fails.
+    void fetchComputerList(computerId, rpc).then((list) => {
+      if (list.kind !== "ok") return;
+      const known = computerConversations.get(computerId) ?? new Map<string, ConversationSummary>();
+      for (const row of list.rows) known.set(row.sessionId, row);
+      computerConversations.set(computerId, known);
+    });
   }
 
   function addReadyListener(computerId: string, listener: (rpc: AgentikRpcClient) => void): () => void {
@@ -212,6 +288,8 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
       attempts.delete(computerId);
       pending.delete(computerId);
       outcomes.delete(computerId);
+      computerConversations.delete(computerId);
+      listingUnsupported.delete(computerId);
       forgetTasksOf(computerId);
       const removed = await options.store.remove(computerId);
       return removed.ok || removed.code === "not_found" ? ok(null) : fail(storeErrorCode(removed.code), removed.message);
@@ -219,6 +297,7 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
 
     connect(computerId, onState) {
       attempts.get(computerId)?.close();
+      listingUnsupported.delete(computerId);
       const attempt = new ConnectAttempt(
         computerId,
         {
@@ -277,21 +356,44 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
 
     async listTasks(computerId, projectId) {
       return call(computerId, async (rpc) => {
-        const mine = [...tasks.values()].filter((t) => t.computerId === computerId && t.view.project_id === projectId);
-        await Promise.all(
-          mine
-            .filter((t) => !isFinalState(taskSummaryFromView(t.view, 0).state))
-            .map(async (t) => {
-              try {
-                remember(computerId, (await rpc.getTask(t.view.task_id)).task);
-              } catch {
-                // Keep the last known state; the task screen reports errors.
-              }
-            }),
-        );
+        const mine = await refreshedLocalTasks(computerId, projectId, rpc);
         return mine
           .map((t) => taskSummaryFromView(t.view, lastSeq.get(t.view.task_id) ?? 0))
           .sort((a, b) => b.createdAt - a.createdAt);
+      });
+    },
+
+    async listConversations(computerId, projectId) {
+      return call(computerId, async (rpc): Promise<ConversationListing> => {
+        const [mine, listed] = await Promise.all([
+          refreshedLocalTasks(computerId, projectId, rpc),
+          fetchComputerList(computerId, rpc, projectId),
+        ]);
+        const local = conversationsFromTasks(
+          mine.map((t) => taskSummaryFromView(t.view, lastSeq.get(t.view.task_id) ?? 0)),
+        );
+        if (listed.kind === "ok") {
+          rememberComputerRows(computerId, listed.rows, projectId);
+          return {
+            conversations: mergeConversations(listed.rows, local),
+            source: "computer",
+            truncated: listed.truncated,
+            warning: null,
+          };
+        }
+        if (listed.kind === "unsupported") {
+          return { conversations: mergeConversations([], local), source: "local", truncated: false, warning: null };
+        }
+        // The computer refused this phone: that is not a listing problem.
+        const failure = apiErrorFrom(listed.error);
+        if (failure.code === "revoked") throw listed.error;
+        const cached = [...(computerConversations.get(computerId)?.values() ?? [])].filter((row) => row.projectId === projectId);
+        return {
+          conversations: mergeConversations(cached, local),
+          source: "local",
+          truncated: false,
+          warning: failure.message,
+        };
       });
     },
 
@@ -474,6 +576,8 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
       tasks.clear();
       lastSeq.clear();
       requests.clear();
+      computerConversations.clear();
+      listingUnsupported.clear();
       // resetAll does not validate the stored index, so this also recovers a corrupt one.
       const reset = await options.store.resetAll();
       if (!reset.ok) return fail(storeErrorCode(reset.code), reset.message);

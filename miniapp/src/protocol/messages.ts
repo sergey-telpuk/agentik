@@ -85,6 +85,12 @@ export interface SessionSummary {
   readonly thread_id?: string;
   readonly created_at: number;
   readonly updated_at: number;
+  /** First prompt of the session, shortened. Absent on computers that predate conversation listing. */
+  readonly title?: string;
+  /** State of the newest turn. */
+  readonly latest_state?: TaskState;
+  /** Number of turns. Absent on computers that predate conversation listing. */
+  readonly turn_count?: number;
 }
 
 export type SessionEventKind =
@@ -136,6 +142,8 @@ export interface AgentListResult {
 
 export interface SessionListResult {
   readonly sessions: readonly SessionSummary[];
+  /** True when older sessions were left out. */
+  readonly sessions_truncated?: boolean;
 }
 
 export interface SessionOpenParams {

@@ -15,6 +15,7 @@ import type {
   ChangesResult,
   PendingApprovalView,
   SessionEventView,
+  SessionSummary,
   TaskView,
 } from "../../protocol/messages";
 import { TASK_STATES, isFinalState, type TaskState } from "../taskState";
@@ -24,6 +25,7 @@ import type {
   ApiError,
   ApprovalDecision,
   ApprovalRequest,
+  ConversationSummary,
   FileChange,
   TaskEvent,
   TaskResult,
@@ -326,4 +328,43 @@ export function apiErrorFrom(err: unknown): ApiError {
     }
   }
   return { code: "not_connected", message: err instanceof Error ? err.message : "The request failed." };
+}
+
+const UNSUPPORTED_CODES: readonly string[] = ["unknown_method", "method_not_found", "unsupported", "not_implemented"];
+
+/**
+ * True when the computer answered that it does not know a method. A daemon
+ * without the method reports `bad_request` with an "unknown method" message
+ * (AGENTIK.md section 6.3: an unknown method produces an explicit error).
+ */
+export function isUnsupportedMethod(err: unknown): boolean {
+  if (!(err instanceof RpcError)) return false;
+  if (UNSUPPORTED_CODES.includes(err.code)) return true;
+  return err.code === "bad_request" && /unknown method|unsupported method|not implemented/i.test(err.message);
+}
+
+/**
+ * One session of the computer's list as a conversation row, or null when it
+ * cannot be shown: no turns yet, or a computer that lists sessions without the
+ * title and turn count (an older version), so there is nothing to display.
+ */
+export function conversationFromSession(item: SessionSummary): ConversationSummary | null {
+  const title = typeof item.title === "string" ? item.title.trim() : "";
+  const turns = item.turn_count;
+  if (title === "" || typeof turns !== "number" || !Number.isInteger(turns) || turns < 1) return null;
+  if (typeof item.session_id !== "string" || item.session_id === "") return null;
+  return {
+    sessionId: item.session_id,
+    projectId: item.project_id,
+    agent: "codex",
+    title,
+    latestState: taskStateOf(item.latest_state),
+    turns,
+    updatedAt: secondsToMs(item.updated_at),
+  };
+}
+
+/** True when the list came from a computer that predates the conversation fields. */
+export function isLegacySessionList(list: readonly SessionSummary[]): boolean {
+  return list.length > 0 && list.every((item) => item.turn_count === undefined && item.title === undefined);
 }

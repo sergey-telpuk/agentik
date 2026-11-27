@@ -828,7 +828,21 @@ describe("live AgentikApi: recovering a corrupt phone identity", () => {
   });
 });
 
-describe("live AgentikApi: agent and model selection", () => {
+describe("live AgentikApi: agent selection and conversation listing", () => {
+  function sessionRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      session_id: "sess-old",
+      project_id: "proj-1",
+      agent: "codex",
+      created_at: 500,
+      updated_at: 600,
+      title: "Refactor the parser",
+      latest_state: "succeeded",
+      turn_count: 3,
+      ...overrides,
+    };
+  }
+
   async function ready(handler: DaemonHandler) {
     const f = await fixture();
     await pinConfirmed(f);
@@ -913,5 +927,154 @@ describe("live AgentikApi: agent and model selection", () => {
     );
     const result = await api.startTask(id, { projectId: "proj-1", agent: "codex", prompt: "x", model: "nope", requestId: "req-bad" });
     expect(!result.ok && result.error).toEqual({ code: "invalid", message: 'model "nope" is not available for agent "codex"' });
+  });
+
+  it("restores past conversations after a fresh start from the computer's list, without local state", async () => {
+    const { api, id, daemon } = await ready((frame) =>
+      frame.method === "session.list"
+        ? {
+            result: {
+              sessions: [
+                sessionRow(),
+                sessionRow({ session_id: "sess-newer", title: "Fix the build", updated_at: 900, latest_state: "failed", turn_count: 1 }),
+                sessionRow({ session_id: "sess-other-project", project_id: "proj-2" }),
+              ],
+            },
+          }
+        : undefined,
+    );
+    // The list is requested as soon as the session is ready, for every project.
+    await until(() => daemon.requests.some((r) => r.method === "session.list"), "prefetch");
+    expect(daemon.requests.find((r) => r.method === "session.list")?.params).toEqual({});
+
+    const listed = await api.listConversations(id, "proj-1");
+    expect(daemon.requests.filter((r) => r.method === "session.list").at(-1)?.params).toEqual({ project_id: "proj-1" });
+    expect(listed.ok && listed.value.source).toBe("computer");
+    expect(listed.ok && listed.value.truncated).toBe(false);
+    expect(listed.ok && listed.value.conversations).toEqual([
+      {
+        sessionId: "sess-newer",
+        projectId: "proj-1",
+        agent: "codex",
+        title: "Fix the build",
+        latestState: "failed",
+        turns: 1,
+        updatedAt: 900_000,
+      },
+      {
+        sessionId: "sess-old",
+        projectId: "proj-1",
+        agent: "codex",
+        title: "Refactor the parser",
+        latestState: "succeeded",
+        turns: 3,
+        updatedAt: 600_000,
+      },
+    ]);
+  });
+
+  it("merges a local and a computer session with the same id into one row led by the computer", async () => {
+    const mine = task({ task_id: "task-9", session_id: "sess-old", state: "running", prompt: "local text", created_at: 700, updated_at: 700 });
+    const { api, id } = await ready((frame) => {
+      switch (frame.method) {
+        case "task.start":
+          return { result: { task: mine, deduplicated: false } };
+        case "task.get":
+          return { result: { task: mine } };
+        case "session.list":
+          return { result: { sessions: [sessionRow({ turn_count: 3, updated_at: 600 })], sessions_truncated: true } };
+        default:
+          return undefined;
+      }
+    });
+    const started = await api.startTask(id, {
+      projectId: "proj-1",
+      agent: "codex",
+      prompt: "local text",
+      requestId: "req-1",
+      sessionId: "sess-old",
+    });
+    expect(started.ok).toBe(true);
+
+    const listed = await api.listConversations(id, "proj-1");
+    expect(listed.ok && listed.value.conversations).toHaveLength(1);
+    const row = listed.ok ? listed.value.conversations[0] : undefined;
+    // The computer owns the title and the turn count; the phone saw newer activity.
+    expect(row).toMatchObject({ sessionId: "sess-old", title: "Refactor the parser", turns: 3, latestState: "running", updatedAt: 700_000 });
+    expect(listed.ok && listed.value.truncated).toBe(true);
+  });
+
+  it("keeps a local-only session that the computer did not list", async () => {
+    const mine = task({ task_id: "task-9", session_id: "sess-new", state: "succeeded", prompt: "brand new" });
+    const { api, id } = await ready((frame) => {
+      switch (frame.method) {
+        case "task.start":
+          return { result: { task: mine, deduplicated: false } };
+        case "session.list":
+          return { result: { sessions: [sessionRow()] } };
+        default:
+          return undefined;
+      }
+    });
+    await api.startTask(id, { projectId: "proj-1", agent: "codex", prompt: "brand new", requestId: "req-1" });
+    const listed = await api.listConversations(id, "proj-1");
+    expect(listed.ok && listed.value.conversations.map((c) => c.sessionId).sort()).toEqual(["sess-new", "sess-old"]);
+  });
+
+  it("falls back to local conversations without an error when the computer does not know session.list", async () => {
+    const mine = task({ task_id: "task-9", session_id: "sess-new", state: "succeeded", prompt: "brand new" });
+    const { api, id, daemon } = await ready((frame) => {
+      switch (frame.method) {
+        case "task.start":
+          return { result: { task: mine, deduplicated: false } };
+        case "session.list":
+          return { error: { code: "bad_request", message: 'unknown method "session.list"' } };
+        default:
+          return undefined;
+      }
+    });
+    const empty = await api.listConversations(id, "proj-1");
+    expect(empty.ok && empty.value).toEqual({ conversations: [], source: "local", truncated: false, warning: null });
+
+    await api.startTask(id, { projectId: "proj-1", agent: "codex", prompt: "brand new", requestId: "req-1" });
+    const listed = await api.listConversations(id, "proj-1");
+    expect(listed.ok && listed.value.source).toBe("local");
+    expect(listed.ok && listed.value.warning).toBeNull();
+    expect(listed.ok && listed.value.conversations.map((c) => [c.sessionId, c.title, c.turns])).toEqual([["sess-new", "brand new", 1]]);
+    // The computer is not asked again during this connection.
+    expect(daemon.requests.filter((r) => r.method === "session.list").length).toBeLessThanOrEqual(1);
+  });
+
+  it("treats a session list without titles and turn counts as unsupported", async () => {
+    const { api, id } = await ready((frame) =>
+      frame.method === "session.list"
+        ? {
+            result: {
+              sessions: [{ session_id: "sess-old", project_id: "proj-1", agent: "codex", created_at: 1, updated_at: 2 }],
+            },
+          }
+        : undefined,
+    );
+    const listed = await api.listConversations(id, "proj-1");
+    expect(listed.ok && listed.value).toEqual({ conversations: [], source: "local", truncated: false, warning: null });
+  });
+
+  it("shows local conversations with a warning when listing fails for another reason", async () => {
+    const mine = task({ task_id: "task-9", session_id: "sess-new", state: "succeeded", prompt: "brand new" });
+    const { api, id } = await ready((frame) => {
+      switch (frame.method) {
+        case "task.start":
+          return { result: { task: mine, deduplicated: false } };
+        case "session.list":
+          return { error: { code: "internal", message: "failed to list sessions" } };
+        default:
+          return undefined;
+      }
+    });
+    await api.startTask(id, { projectId: "proj-1", agent: "codex", prompt: "brand new", requestId: "req-1" });
+    const listed = await api.listConversations(id, "proj-1");
+    expect(listed.ok && listed.value.source).toBe("local");
+    expect(listed.ok && listed.value.warning).toContain("failed to list sessions");
+    expect(listed.ok && listed.value.conversations.map((c) => c.sessionId)).toEqual(["sess-new"]);
   });
 });
