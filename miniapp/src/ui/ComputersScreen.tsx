@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { AgentikApi, Computer } from "../api/types";
+import agentikIcon from "../assets/agentik-icon.svg";
 import type { PersistenceState } from "../storage/pinnedDevices";
-import { COMPUTER_STATUS, relativeTime, sentence, shortId } from "./format";
-import { ConfirmDialog, Empty, Notice, Page, SkeletonList, StatusChip, useBusy, useNow } from "./kit";
+import { sentence, shortId } from "./format";
+import { Empty, Notice, Page, SkeletonList } from "./kit";
 
 interface Props {
   readonly api: AgentikApi;
   readonly persistence: PersistenceState;
-  readonly now: () => number;
   readonly onAdd: () => void;
   readonly onOpen: (computer: Computer) => void;
   readonly onSettings: () => void;
@@ -18,21 +18,9 @@ type Listing =
   | { readonly kind: "ready"; readonly computers: Computer[] }
   | { readonly kind: "error"; readonly message: string };
 
-function seenText(c: Computer, now: number): string {
-  if (c.status === "pending_confirmation") return "Confirm this phone on the computer";
-  if (c.status === "replaced") return "Presented a different key. Pair again";
-  if (c.status === "revoked") return "This phone no longer has access";
-  if (c.lastSeenAt === null) return "Never connected";
-  return c.status === "online" ? `Seen ${relativeTime(c.lastSeenAt, now)}` : `Last seen ${relativeTime(c.lastSeenAt, now)}`;
-}
-
-export function ComputersScreen({ api, persistence, now, onAdd, onOpen, onSettings }: Props) {
+export function ComputersScreen({ api, persistence, onAdd, onOpen, onSettings }: Props) {
   const [listing, setListing] = useState<Listing>({ kind: "loading" });
   const [reload, setReload] = useState(0);
-  const [forgetting, setForgetting] = useState<Computer | null>(null);
-  const [forgetError, setForgetError] = useState<string | null>(null);
-  const [busy, run] = useBusy();
-  const current = useNow(30_000, now);
 
   useEffect(() => {
     let cancelled = false;
@@ -44,20 +32,6 @@ export function ComputersScreen({ api, persistence, now, onAdd, onOpen, onSettin
       cancelled = true;
     };
   }, [api, reload]);
-
-  const confirmForget = useCallback(async () => {
-    if (forgetting === null) return;
-    await run(async () => {
-      const result = await api.forgetComputer(forgetting.id);
-      if (result.ok) {
-        setForgetting(null);
-        setForgetError(null);
-        setReload((n) => n + 1);
-      } else {
-        setForgetError(sentence(result.error.message));
-      }
-    });
-  }, [api, forgetting, run]);
 
   const unsupported = persistence.status === "unsupported";
 
@@ -112,50 +86,21 @@ export function ComputersScreen({ api, persistence, now, onAdd, onOpen, onSettin
       )}
       {listing.kind === "ready" && listing.computers.length > 0 && (
         <ul className="card-list">
-          {listing.computers.map((c) => {
-            const status = COMPUTER_STATUS[c.status];
-            return (
-              <li key={c.id} className="card computer-card">
-                <button type="button" className="card-main" onClick={() => onOpen(c)} aria-label={`Open ${c.name}, ${status.label}`}>
-                  <span className="card-title-row">
-                    <span className="card-title">{c.name}</span>
-                    <StatusChip tone={status.tone} label={status.label} />
-                  </span>
-                  <span className="card-meta">{seenText(c, current)}</span>
-                  <span className="card-meta mono">{shortId(c.id)}</span>
-                </button>
-                <button
-                  type="button"
-                  className="button button-ghost button-small"
-                  onClick={() => {
-                    setForgetError(null);
-                    setForgetting(c);
-                  }}
-                  aria-label={`Forget ${c.name}`}
-                >
-                  Forget
-                </button>
-              </li>
-            );
-          })}
+          {listing.computers.map((c) => (
+            // The whole row is tappable with a pointer; keyboard and screen reader users reach the same
+            // action through the two real buttons. Clicks on them bubble up to this one handler.
+            <li key={c.id} className="computer-row" onClick={() => onOpen(c)}>
+              <img className="computer-icon" src={agentikIcon} alt="" width={48} height={48} />
+              <button type="button" className="computer-row-main">
+                <span className="computer-name">{c.name}</span>
+                <span className="computer-id mono">{shortId(c.id)}</span>
+              </button>
+              <button type="button" className="button button-primary button-pill" aria-label={`Open ${c.name}`}>
+                OPEN
+              </button>
+            </li>
+          ))}
         </ul>
-      )}
-      {forgetting !== null && (
-        <ConfirmDialog
-          title={`Forget ${forgetting.name}?`}
-          confirmLabel="Forget computer"
-          destructive
-          busy={busy}
-          error={forgetError}
-          onConfirm={() => void confirmForget()}
-          onCancel={() => setForgetting(null)}
-        >
-          <p>This removes the pinned key from this phone only.</p>
-          <p className="hint">
-            The computer keeps its record of this phone until you revoke it there. To use the computer again you need a
-            new invitation from it.
-          </p>
-        </ConfirmDialog>
       )}
     </Page>
   );

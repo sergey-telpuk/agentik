@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Agent, AgentikApi, Computer, ConnectionState, Project } from "../api/types";
 import { CONNECTION_STEPS, connectionText, sentence, shortId } from "./format";
-import { Empty, Notice, Page, Section, SkeletonList, StatusChip } from "./kit";
+import { ConfirmDialog, Empty, Notice, Page, Section, SkeletonList, StatusChip } from "./kit";
 
 interface Props {
   readonly api: AgentikApi;
@@ -47,6 +47,7 @@ function ConnectionProgress({ connection, skipConfirm }: { connection: Connectio
 
 export function ComputerScreen({ api, computer, connection, onRetry, onForget, onOpenProject, onBack }: Props) {
   const [loaded, setLoaded] = useState<Loaded>({ kind: "loading" });
+  const [confirmingForget, setConfirmingForget] = useState(false);
   const ready = connection?.phase === "ready";
   const name = connection?.phase === "ready" ? connection.computerName : computer.name;
 
@@ -85,7 +86,7 @@ export function ComputerScreen({ api, computer, connection, onRetry, onForget, o
                 Retry
               </button>
             ) : (
-              <button type="button" className="button button-destructive" onClick={onForget}>
+              <button type="button" className="button button-destructive" onClick={() => setConfirmingForget(true)}>
                 Forget this computer
               </button>
             )}
@@ -131,6 +132,26 @@ export function ComputerScreen({ api, computer, connection, onRetry, onForget, o
             </ul>
           )}
         </Section>
+      )}
+      {connection?.phase !== "failed" || connection.retryable ? (
+        <button type="button" className="button button-ghost forget-button" onClick={() => setConfirmingForget(true)}>
+          Forget this computer
+        </button>
+      ) : null}
+      {confirmingForget && (
+        <ConfirmDialog
+          title={`Forget ${name}?`}
+          confirmLabel="Forget computer"
+          destructive
+          onConfirm={onForget}
+          onCancel={() => setConfirmingForget(false)}
+        >
+          <p>This removes the pinned key from this phone only.</p>
+          <p className="hint">
+            The computer keeps its record of this phone until you revoke it there. To use the computer again you need a
+            new invitation from it.
+          </p>
+        </ConfirmDialog>
       )}
     </Page>
   );

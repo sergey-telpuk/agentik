@@ -459,8 +459,73 @@ p {
   font-weight: 600;
 }
 
-.computer-card .button-ghost {
-  margin-right: 8px;
+/* Computers list: a messenger-style row with the app icon, name and id, and an OPEN pill. */
+
+.computer-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px var(--pad) 10px 12px;
+  background: var(--section-bg);
+  border-radius: var(--radius);
+  box-shadow: 0 0 0 1px var(--separator);
+  cursor: pointer;
+}
+
+.computer-icon {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 11px;
+}
+
+.computer-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-height: 48px;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-small);
+}
+
+.computer-name {
+  max-width: 100%;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.computer-id {
+  max-width: 100%;
+  font-size: 14px;
+  color: var(--hint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.button-pill {
+  flex: none;
+  min-height: 34px;
+  padding: 6px 18px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.forget-button {
+  align-self: center;
   color: var(--destructive);
 }
 

@@ -79,7 +79,7 @@ describe("App", () => {
     expect(button("Connect a computer").disabled).toBe(true);
   });
 
-  it("pairs and pins a computer, then lists it as pending confirmation", async () => {
+  it("pairs and pins a computer, then lists it without status text", async () => {
     await render(services(new MemoryBackend()));
     expect(container.textContent).toContain("No computers paired yet");
 
@@ -90,8 +90,15 @@ describe("App", () => {
     expect(container.textContent).toContain("not trusted yet");
 
     await click("Pin this computer");
-    await settle(() => container.textContent?.includes("pending confirmation") === true);
-    expect(container.textContent).toContain("pending confirmation");
+    await settle(() => container.querySelector("li.computer-row") !== null);
+    // The list row shows the computer, but no status text.
+    expect(container.querySelector("li.computer-row .button-primary")?.textContent).toBe("OPEN");
+    expect(container.textContent).not.toContain("pending confirmation");
+
+    await click("OPEN");
+    // The computer's own screen carries the confirmation step.
+    await settle(() => container.textContent?.includes("Confirm on computer") === true);
+    expect(container.textContent).toContain("Confirm on computer");
   });
 
   it("rejects an expired invitation with a readable message", async () => {

@@ -104,21 +104,57 @@ async function openMainProject(scenario: ScenarioName, project = "Billing servic
 }
 
 describe("App flows on mock data", () => {
-  it("lists every computer status with text, not colour only", async () => {
+  it("lists computers as icon rows with name, id and OPEN, and no status text", async () => {
     await render("happy");
-    const text = container.textContent ?? "";
-    for (const label of ["online", "offline", "pending confirmation", "key replaced"]) expect(text).toContain(label);
-    expect(text).toContain("Demo data");
+    const rows = [...container.querySelectorAll("li.computer-row")];
+    expect(rows.length).toBeGreaterThanOrEqual(4);
+    for (const row of rows) {
+      expect(row.querySelector("img.computer-icon")).not.toBeNull();
+      expect(row.querySelector(".computer-name")?.textContent).not.toBe("");
+      expect(row.querySelector(".computer-id")?.textContent).toMatch(/^\w{4} \w{4} …$/);
+      expect(row.querySelector(".button-primary")?.textContent).toBe("OPEN");
+      expect(row.querySelector(".chip")).toBeNull();
+      expect(row.textContent).not.toMatch(/online|offline|pending|replaced|ended|seen|never connected|!/i);
+    }
+    expect(container.textContent).toContain("Demo data");
   });
 
-  it("asks before forgetting a computer", async () => {
+  it("opens a computer from the row, the name area and the OPEN button", async () => {
+    for (const target of ["Open Work MacBook", "Work MacBook"]) {
+      await render("happy");
+      await click(target, 10);
+      expect(heading()).toBe("Work MacBook");
+      act(() => root.unmount());
+      root = createRoot(container);
+    }
     await render("happy");
-    await click("Forget Home Linux box");
+    await act(async () => {
+      container.querySelector<HTMLElement>("li.computer-row")?.click();
+    });
+    await advance(10);
+    expect(container.querySelector(".page-title h2")).not.toBeNull();
+    expect(container.querySelector("li.computer-row")).toBeNull();
+  });
+
+  it("keeps the connection status on the computer screen, not on the list row", async () => {
+    await render("happy");
+    await click("Open Work MacBook");
+    expect(container.textContent).toContain("connecting");
+    await advance(3000);
+    expect(container.textContent).toContain("secure session");
+  });
+
+  it("asks before forgetting a computer, from the computer screen", async () => {
+    await render("happy");
+    expect(container.textContent).not.toContain("Forget");
+    await click("Open Home Linux box", 10);
+    await click("Forget this computer");
     expect(dialog()?.textContent).toContain("Forget Home Linux box?");
     await click("Cancel");
-    expect(container.textContent).toContain("Home Linux box");
-    await click("Forget Home Linux box");
+    expect(dialog()).toBeNull();
+    await click("Forget this computer");
     await click("Forget computer", 10);
+    expect(container.querySelector("li.computer-row")).not.toBeNull();
     expect(container.textContent).not.toContain("Home Linux box");
   });
 
@@ -221,7 +257,10 @@ describe("App flows on mock data", () => {
     expect(container.textContent).toContain("Work MacBook ended access for this phone");
     expect(container.textContent).toContain("not restored automatically");
     await click("Back to computers", 10);
-    expect(container.textContent).toContain("access ended");
+    // The list row shows no status; opening a revoked computer leads to the access-ended screen.
+    expect(container.textContent).not.toContain("access ended");
+    await click("Open Work MacBook", 10);
+    expect(heading()).toBe("Access ended");
   });
 
   it("does not allow starting a task when Codex is missing", async () => {

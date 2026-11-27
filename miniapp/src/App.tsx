@@ -227,7 +227,6 @@ function Screen({ route, ready, services, connection, listKey, scenarios, push, 
           key={listKey}
           api={api}
           persistence={store.persistence}
-          now={now}
           onAdd={() => push({ name: "pair" })}
           onOpen={(computer) =>
             computer.status === "revoked"
