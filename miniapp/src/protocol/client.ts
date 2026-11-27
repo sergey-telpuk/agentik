@@ -167,16 +167,17 @@ export class AgentikRpcClient {
   }
 
   startTask(params: TaskStartParams, requestId?: string): Promise<TaskResult> {
-    return this.request(
-      "task.start",
-      {
-        project_id: params.project_id,
-        session_id: params.session_id,
-        agent: params.agent,
-        prompt: params.prompt,
-      },
-      requestId === undefined ? {} : { requestId },
-    );
+    const body: Record<string, unknown> = {
+      project_id: params.project_id,
+      session_id: params.session_id,
+      agent: params.agent,
+      prompt: params.prompt,
+    };
+    if (params.model !== undefined && params.model !== "") {
+      body["agent_id"] = params.agent_id ?? params.agent;
+      body["model"] = params.model;
+    }
+    return this.request("task.start", body, requestId === undefined ? {} : { requestId });
   }
 
   getTask(taskId: string): Promise<TaskResult> {

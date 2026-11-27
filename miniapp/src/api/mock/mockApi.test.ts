@@ -215,6 +215,31 @@ describe("tasks", () => {
     });
   });
 
+  it("validates the chosen agent and model, and a different model under one request id conflicts", async () => {
+    const { api } = await setup("happy");
+    await connect(api, MAIN);
+    const agents = value(await api.listAgents(MAIN));
+    expect(agents.map((a) => [a.id, a.status])).toEqual([
+      ["codex", "available"],
+      ["claude", "unsupported"],
+    ]);
+    const base = { projectId: "proj_billing", agent: "codex", prompt: "Fix it" };
+    expect(await api.startTask(MAIN, { ...base, model: "nope", requestId: "m1" })).toMatchObject({
+      ok: false,
+      error: { code: "invalid" },
+    });
+    expect(await api.startTask(MAIN, { ...base, agent: "claude", requestId: "m2" })).toMatchObject({
+      ok: false,
+      error: { code: "agent_unavailable" },
+    });
+    const first = value(await api.startTask(MAIN, { ...base, model: "mock-small", requestId: "m3" }));
+    expect(value(await api.startTask(MAIN, { ...base, model: "mock-small", requestId: "m3" })).id).toBe(first.id);
+    expect(await api.startTask(MAIN, { ...base, model: "mock-large", requestId: "m3" })).toMatchObject({
+      ok: false,
+      error: { code: "conflict" },
+    });
+  });
+
   it("reports busy while another task is active in the same project", async () => {
     const { api } = await setup("happy");
     await connect(api, MAIN);

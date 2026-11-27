@@ -30,6 +30,8 @@ export interface TaskView {
   readonly session_id: string;
   readonly project_id: string;
   readonly agent: string;
+  /** The model the task was started with; empty or absent means the agent's default. */
+  readonly model?: string;
   readonly prompt: string;
   readonly state: TaskState;
   readonly result_text: string;
@@ -45,12 +47,35 @@ export interface ProjectInfo {
   readonly agents: readonly string[];
 }
 
+/** One model an agent can run, as listed by the computer. */
+export interface AgentModelInfo {
+  readonly id: string;
+  readonly display_name?: string;
+  readonly description?: string;
+  readonly is_default?: boolean;
+}
+
+export type AgentStatusWire = "ready" | "not_authenticated" | "unknown" | "unsupported" | "not_installed";
+
+/**
+ * One agent in `agent.list`. `name`..`detail` are the original fields; the
+ * rest is sent by computers that detect every installed agent and is absent
+ * from older ones, so each is optional.
+ */
 export interface AgentInfo {
   readonly name: string;
   readonly available: boolean;
   readonly authenticated: boolean;
   readonly version?: string;
   readonly detail?: string;
+  readonly id?: string;
+  readonly display_name?: string;
+  readonly status?: AgentStatusWire;
+  readonly status_text?: string;
+  readonly supported?: boolean;
+  readonly models?: readonly AgentModelInfo[];
+  readonly models_source?: "live" | "static";
+  readonly models_detail?: string;
 }
 
 export interface SessionSummary {
@@ -138,6 +163,13 @@ export interface TaskStartParams {
   readonly session_id: string | null;
   readonly agent: string;
   readonly prompt: string;
+  /**
+   * Set together with `model` when a model other than the agent's default is
+   * chosen. Older computers reject unknown parameters, so a request that does
+   * not choose a model keeps exactly the original shape.
+   */
+  readonly agent_id?: string;
+  readonly model?: string;
 }
 
 export interface TaskResult {

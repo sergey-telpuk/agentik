@@ -749,6 +749,21 @@ textarea[aria-invalid="true"] {
   border-color: var(--destructive);
 }
 
+select {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-small);
+  background: var(--section-bg);
+  font: inherit;
+  color: inherit;
+}
+
+select:disabled {
+  opacity: 0.6;
+}
+
 #invitation {
   font-family: var(--mono);
   font-size: 13px;

@@ -19,6 +19,7 @@ import {
   type Agent,
   type AgentikApi,
   type AgentId,
+  type AgentModel,
   type ApiError,
   type ApiErrorCode,
   type ApiResult,
@@ -88,6 +89,12 @@ interface PausedApproval {
   readonly onApprove: readonly Step[];
   readonly onDeny: readonly Step[];
 }
+
+/** Models the demo Codex offers; the live backend reads them from the computer. */
+const MOCK_CODEX_MODELS: readonly AgentModel[] = [
+  { id: "mock-large", name: "Mock Large", description: "Most capable demo model", isDefault: true },
+  { id: "mock-small", name: "Mock Small", description: "Faster, cheaper demo model", isDefault: false },
+];
 
 class MockTask {
   readonly id: string;
@@ -446,13 +453,28 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
   }
 
   function agents(): Agent[] {
+    const installed = data.agentStatus === "available";
     return [
       {
         id: "codex",
         name: "Codex",
         status: data.agentStatus,
-        version: data.agentStatus === "available" ? "0.98.0" : null,
+        version: installed ? "0.98.0" : null,
+        models: installed ? MOCK_CODEX_MODELS : [],
       },
+      // Detected but not drivable yet, to show how such agents are listed.
+      ...(installed
+        ? [
+            {
+              id: "claude",
+              name: "Claude Code",
+              status: "unsupported" as const,
+              version: "2.0.0",
+              statusText: "Detected, not supported yet: approvals could not be routed to the phone.",
+              models: [],
+            },
+          ]
+        : []),
     ];
   }
 
@@ -651,7 +673,12 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
         return fail("invalid", `The task description is longer than ${MAX_PROMPT_LENGTH} characters.`);
       }
       const sessionId = input.sessionId ?? null;
-      const key = JSON.stringify([computerId, input.projectId, sessionId, input.agent, prompt]);
+      const model = input.model?.trim() ?? "";
+      const key = JSON.stringify(
+        model === ""
+          ? [computerId, input.projectId, sessionId, input.agent, prompt]
+          : [computerId, input.projectId, sessionId, input.agent, prompt, model],
+      );
       const previous = requests.get(input.requestId);
       if (previous !== undefined) {
         return previous.key === key
@@ -664,11 +691,17 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
       ) {
         return fail("not_found", "No such conversation in this project.");
       }
-      if (agents().find((a) => a.id === input.agent)?.status !== "available") {
+      const chosen = agents().find((a) => a.id === input.agent);
+      if (chosen?.status !== "available") {
         return fail(
           "agent_unavailable",
-          "Codex is not installed on this computer. Install it and sign in on the computer, then try again.",
+          chosen?.status === "unsupported"
+            ? `${chosen.name} is not supported yet.`
+            : "Codex is not installed on this computer. Install it and sign in on the computer, then try again.",
         );
+      }
+      if (model !== "" && !(chosen.models ?? []).some((m) => m.id === model)) {
+        return fail("invalid", `Model “${model}” is not available for ${chosen.name}.`);
       }
       const active = [...record.value.tasks.values()].some(
         (t) => t.projectId === input.projectId && !isFinalState(t.state),

@@ -827,3 +827,91 @@ describe("live AgentikApi: recovering a corrupt phone identity", () => {
     expect(message).toContain("Clear local pinned data");
   });
 });
+
+describe("live AgentikApi: agent and model selection", () => {
+  async function ready(handler: DaemonHandler) {
+    const f = await fixture();
+    await pinConfirmed(f);
+    const daemon = plainDaemon(paired(handler));
+    const api = liveApi(f, { createRelayClient: attachingRelay().createRelayClient, secureChannel: daemon.secureChannel });
+    const id = f.invitation.deviceIdText;
+    const { states } = track(api, id);
+    await until(() => last(states)?.phase === "ready", "ready");
+    return { api, id, daemon };
+  }
+
+  const detected = {
+    agents: [
+      {
+        name: "codex",
+        id: "codex",
+        display_name: "Codex",
+        available: true,
+        authenticated: true,
+        version: "0.160.0",
+        status: "ready",
+        status_text: "Ready",
+        supported: true,
+        models: [{ id: "big", display_name: "Big", is_default: true }, { id: "small", display_name: "Small" }],
+        models_source: "live",
+      },
+      { name: "claude", id: "claude", display_name: "Claude Code", available: true, authenticated: true, status: "unsupported" },
+    ],
+  };
+
+  it("lists detected agents with their models", async () => {
+    const { api, id } = await ready((frame) => (frame.method === "agent.list" ? { result: detected } : undefined));
+    const agents = await api.listAgents(id);
+    expect(agents.ok && agents.value.map((a) => [a.id, a.status, a.models?.length])).toEqual([
+      ["codex", "available", 2],
+      ["claude", "unsupported", 0],
+    ]);
+  });
+
+  it("sends agent_id and model when a model is chosen, and keeps the original request shape otherwise", async () => {
+    const { api, id, daemon } = await ready((frame) =>
+      frame.method === "task.start" ? { result: { task: task({ state: "starting", model: frame.params["model"] as string }), deduplicated: false } } : undefined,
+    );
+
+    const chosen = await api.startTask(id, { projectId: "proj-1", agent: "codex", prompt: "Run tests", model: "small", requestId: "req-m" });
+    expect(chosen.ok).toBe(true);
+    expect(daemon.requests.find((r) => r.request_id === "req-m")?.params).toEqual({
+      project_id: "proj-1",
+      session_id: null,
+      agent: "codex",
+      prompt: "Run tests",
+      agent_id: "codex",
+      model: "small",
+    });
+
+    const plain = await api.startTask(id, { projectId: "proj-1", agent: "codex", prompt: "Run tests", requestId: "req-d" });
+    expect(plain.ok).toBe(true);
+    expect(daemon.requests.find((r) => r.request_id === "req-d")?.params).toEqual({
+      project_id: "proj-1",
+      session_id: null,
+      agent: "codex",
+      prompt: "Run tests",
+    });
+  });
+
+  it("treats the same request id with another model as a conflict without asking the computer", async () => {
+    const { api, id, daemon } = await ready((frame) =>
+      frame.method === "task.start" ? { result: { task: task({ state: "starting" }), deduplicated: false } } : undefined,
+    );
+    const input = { projectId: "proj-1", agent: "codex", prompt: "Run tests", requestId: "req-same" };
+    expect((await api.startTask(id, { ...input, model: "big" })).ok).toBe(true);
+    const conflict = await api.startTask(id, { ...input, model: "small" });
+    expect(!conflict.ok && conflict.error.code).toBe("conflict");
+    expect(daemon.requests.filter((r) => r.method === "task.start")).toHaveLength(1);
+  });
+
+  it("reports a rejected model as an invalid request with the computer's message", async () => {
+    const { api, id } = await ready((frame) =>
+      frame.method === "task.start"
+        ? { error: { code: "unknown_model", message: 'model "nope" is not available for agent "codex"' } }
+        : undefined,
+    );
+    const result = await api.startTask(id, { projectId: "proj-1", agent: "codex", prompt: "x", model: "nope", requestId: "req-bad" });
+    expect(!result.ok && result.error).toEqual({ code: "invalid", message: 'model "nope" is not available for agent "codex"' });
+  });
+});

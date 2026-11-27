@@ -325,7 +325,12 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
         return fail("invalid", `The task description is longer than ${MAX_PROMPT_LENGTH} characters.`);
       }
       const sessionId = input.sessionId ?? null;
-      const content = JSON.stringify([computerId, input.projectId, sessionId, input.agent, prompt]);
+      const model = input.model?.trim() ?? "";
+      const content = JSON.stringify(
+        model === ""
+          ? [computerId, input.projectId, sessionId, input.agent, prompt]
+          : [computerId, input.projectId, sessionId, input.agent, prompt, model],
+      );
       const previous = requests.get(input.requestId);
       if (previous !== undefined && previous !== content) {
         return fail("conflict", "This request id was already used for a different task.");
@@ -335,7 +340,13 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
       // answer never starts a second task (AGENTIK.md section 7.2).
       return call(computerId, async (rpc) => {
         const result = await rpc.startTask(
-          { project_id: input.projectId, session_id: sessionId, agent: input.agent, prompt },
+          {
+            project_id: input.projectId,
+            session_id: sessionId,
+            agent: input.agent,
+            prompt,
+            ...(model === "" ? {} : { agent_id: input.agent, model }),
+          },
           input.requestId,
         );
         return remember(computerId, result.task);

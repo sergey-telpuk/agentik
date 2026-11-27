@@ -78,13 +78,35 @@ export interface Project {
   readonly activeTasks: number;
 }
 
-export type AgentId = "codex";
+/** The computer's identifier for an agent, for example `codex`. Opaque to the UI. */
+export type AgentId = string;
+
+/** A model an agent can run. Text comes from the computer: render as plain text only. */
+export interface AgentModel {
+  /** The value sent back in `StartTaskInput.model`. */
+  readonly id: string;
+  readonly name: string;
+  readonly description: string | null;
+  /** The model the agent uses when none is chosen. */
+  readonly isDefault: boolean;
+}
 
 export interface Agent {
   readonly id: AgentId;
   readonly name: string;
-  readonly status: "available" | "not_installed" | "not_authorized";
+  /**
+   * Only `available` agents can start a task. `unsupported` is an agent that is
+   * installed but that Agentik cannot drive yet; `unknown` is one whose sign-in
+   * state could not be determined.
+   */
+  readonly status: "available" | "not_installed" | "not_authorized" | "unknown" | "unsupported";
   readonly version: string | null;
+  /** Why the agent is not available (or a short "Ready"), as reported by the computer. */
+  readonly statusText?: string;
+  /** Models to choose from. Empty or absent means only the agent's default model. */
+  readonly models?: readonly AgentModel[];
+  /** Set when the model list is not a live one, for example it could not be read. */
+  readonly modelsNote?: string;
 }
 
 export interface ApprovalRequest {
@@ -186,6 +208,8 @@ export interface StartTaskInput {
   readonly projectId: string;
   readonly agent: AgentId;
   readonly prompt: string;
+  /** A model from the agent's list. Empty or absent means the agent's own default. */
+  readonly model?: string;
   /**
    * Chosen once per submission. Repeating it with the same content returns the
    * existing task; with different content it is a conflict (AGENTIK.md 7.2).

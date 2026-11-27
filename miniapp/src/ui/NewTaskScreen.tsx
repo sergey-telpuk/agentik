@@ -29,6 +29,8 @@ export function NewTaskScreen({
   const [prompt, setPrompt] = useState(initialPrompt);
   const [agents, setAgents] = useState<Agent[] | null>(null);
   const [agent, setAgent] = useState<AgentId>("codex");
+  // Empty means the agent's own default model.
+  const [model, setModel] = useState("");
   const [error, setError] = useState<string | null>(null);
   // One id per submitted content: retrying after a lost response reuses it,
   // so the computer returns the same task instead of starting a second one.
@@ -36,13 +38,19 @@ export function NewTaskScreen({
   const [busy, run] = useBusy();
   const promptId = useId();
   const counterId = useId();
+  const modelId = useId();
+  const modelHintId = useId();
 
   useEffect(() => {
     let cancelled = false;
     void api.listAgents(computerId).then((result) => {
       if (cancelled) return;
-      if (result.ok) setAgents(result.value);
-      else setError(sentence(result.error.message));
+      if (result.ok) {
+        setAgents(result.value);
+        // Start on a usable agent: the first one that can run a task.
+        const usable = result.value.find((a) => a.status === "available");
+        if (usable !== undefined) setAgent(usable.id);
+      } else setError(sentence(result.error.message));
     });
     return () => {
       cancelled = true;
@@ -50,15 +58,25 @@ export function NewTaskScreen({
   }, [api, computerId]);
 
   const selected = agents?.find((a) => a.id === agent);
+  const models = selected?.status === "available" ? (selected.models ?? []) : [];
+  const defaultModel = models.find((m) => m.isDefault);
+  // A model from another agent's list (or one that vanished) is never sent.
+  const chosenModel = models.some((m) => m.id === model) ? model : "";
   const trimmed = prompt.trim();
   const tooLong = trimmed.length > MAX_PROMPT_LENGTH;
   const canSubmit = trimmed !== "" && !tooLong && selected?.status === "available" && !busy;
 
   async function submit(): Promise<void> {
-    const content = JSON.stringify([agent, trimmed]);
+    const content = JSON.stringify([agent, chosenModel, trimmed]);
     const id = request !== null && request.content === content ? request.id : newRequestId();
     setRequest({ id, content });
-    const result = await api.startTask(computerId, { projectId, agent, prompt: trimmed, requestId: id });
+    const result = await api.startTask(computerId, {
+      projectId,
+      agent,
+      prompt: trimmed,
+      requestId: id,
+      ...(chosenModel === "" ? {} : { model: chosenModel }),
+    });
     if (result.ok) onStarted(result.value);
     else setError(sentence(result.error.message));
   }
@@ -117,27 +135,55 @@ export function NewTaskScreen({
                 name="agent"
                 value={a.id}
                 checked={agent === a.id}
-                onChange={() => setAgent(a.id)}
-                disabled={busy}
+                onChange={() => {
+                  setAgent(a.id);
+                  setModel("");
+                }}
+                disabled={busy || a.status !== "available"}
               />
               <span className="choice-text">
                 <span className="choice-title">{a.name}</span>
-                <span className="hint">
-                  {a.status === "available"
-                    ? `Version ${a.version ?? "unknown"} on ${computerName}`
-                    : a.status === "not_installed"
-                      ? `Not installed on ${computerName}`
-                      : `Not signed in on ${computerName}`}
-                </span>
+                <span className="hint">{agentLine(a, computerName)}</span>
               </span>
             </label>
           ))}
-          <p className="hint">Only Codex is supported in this version.</p>
+          <p className="hint">Agents that are not ready are shown but cannot be selected.</p>
         </fieldset>
 
+        {selected?.status === "available" && (
+          <div className="field">
+            <label htmlFor={modelId}>Model</label>
+            <select
+              id={modelId}
+              value={chosenModel}
+              onChange={(e) => setModel(e.target.value)}
+              disabled={busy || models.length === 0}
+              aria-describedby={modelHintId}
+            >
+              <option value="">{defaultModel === undefined ? "Default model" : `Default (${defaultModel.name})`}</option>
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+            <p id={modelHintId} className="hint">
+              {models.length === 0
+                ? (selected.modelsNote ?? `${selected.name} offers no model choice here; it uses its own default model.`)
+                : (models.find((m) => m.id === chosenModel)?.description ?? "The agent's own default model is used unless you pick one.")}
+            </p>
+          </div>
+        )}
+
         {selected !== undefined && selected.status !== "available" && (
-          <Notice tone="warn" title="Codex is not available">
-            <p>Install Codex on the computer and sign in there, then come back.</p>
+          <Notice tone="warn" title={`${selected.name} is not available`}>
+            <p>{agentLine(selected, computerName)}</p>
+          </Notice>
+        )}
+
+        {agents !== null && !agents.some((a) => a.status === "available") && (
+          <Notice tone="warn" title="No agent is ready">
+            <p>Install a supported agent on the computer and sign in there, then come back.</p>
           </Notice>
         )}
 
@@ -153,4 +199,20 @@ export function NewTaskScreen({
       </form>
     </Page>
   );
+}
+
+/** One plain-text line saying whether an agent can be used. */
+function agentLine(a: Agent, computerName: string): string {
+  switch (a.status) {
+    case "available":
+      return `Version ${a.version ?? "unknown"} on ${computerName}`;
+    case "not_installed":
+      return `Not installed on ${computerName}`;
+    case "not_authorized":
+      return `Not signed in on ${computerName}`;
+    case "unknown":
+      return `Sign-in state unknown on ${computerName}${a.statusText !== undefined ? `: ${a.statusText}` : ""}`;
+    case "unsupported":
+      return a.statusText ?? "Detected, not supported yet";
+  }
 }

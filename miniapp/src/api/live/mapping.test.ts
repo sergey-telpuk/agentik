@@ -118,8 +118,89 @@ describe("live mapping", () => {
     });
   });
 
+  it("lists every detected agent and only ready ones are available", () => {
+    const list = agentsFromInfo([
+      {
+        name: "codex",
+        id: "codex",
+        display_name: "Codex",
+        available: true,
+        authenticated: true,
+        version: "codex-cli 1",
+        status: "ready",
+        status_text: "Ready",
+        supported: true,
+        models: [
+          { id: "big", display_name: "Big", description: "Largest", is_default: true },
+          { id: "small", display_name: "Small" },
+        ],
+        models_source: "live",
+      },
+      {
+        name: "claude",
+        id: "claude",
+        display_name: "Claude Code",
+        available: true,
+        authenticated: true,
+        status: "unsupported",
+        status_text: "Detected, not supported yet: reason",
+        supported: false,
+        // Models of an agent that cannot run tasks are never offered.
+        models: [{ id: "x" }],
+      },
+      { name: "cursor-agent", available: true, authenticated: false, status: "not_authenticated", status_text: "Not signed in" },
+      { name: "gemini", available: true, authenticated: false, status: "unknown" },
+      { name: "weird", available: true, authenticated: true, status: "something-new" as never },
+    ]);
+    expect(list.map((a) => [a.id, a.status])).toEqual([
+      ["codex", "available"],
+      ["claude", "unsupported"],
+      ["cursor-agent", "not_authorized"],
+      ["gemini", "unknown"],
+      // An unrecognised status is never read as ready.
+      ["weird", "unknown"],
+    ]);
+    expect(list[0]).toMatchObject({
+      name: "Codex",
+      version: "codex-cli 1",
+      models: [
+        { id: "big", name: "Big", description: "Largest", isDefault: true },
+        { id: "small", name: "Small", description: null, isDefault: false },
+      ],
+    });
+    expect(list[1]?.models).toEqual([]);
+    expect(list[1]?.statusText).toBe("Detected, not supported yet: reason");
+  });
+
+  it("keeps computer-supplied agent and model text as plain text, bounded and de-duplicated", () => {
+    const [agent] = agentsFromInfo([
+      {
+        name: "codex",
+        available: true,
+        authenticated: true,
+        status: "ready",
+        display_name: "<b>Codex</b>".padEnd(500, "x"),
+        models: [
+          { id: "m1", display_name: "<img src=x onerror=alert(1)>" },
+          { id: "m1", display_name: "duplicate id" },
+          { id: "", display_name: "no id" },
+        ],
+        models_source: "static",
+        models_detail: "could not list models",
+      },
+    ]);
+    expect(agent?.name.startsWith("<b>Codex</b>")).toBe(true);
+    expect(agent?.name.length).toBeLessThanOrEqual(128);
+    expect(agent?.models).toHaveLength(1);
+    expect(agent?.models?.[0]?.name).toBe("<img src=x onerror=alert(1)>");
+    expect(agent?.modelsNote).toBe("could not list models");
+  });
+
   it("translates daemon and transport errors into UI error codes", () => {
     expect(apiErrorFrom(new RpcError("project_busy", "x")).code).toBe("busy");
+    expect(apiErrorFrom(new RpcError("unknown_model", "model nope")).code).toBe("invalid");
+    expect(apiErrorFrom(new RpcError("agent_unsupported", "x")).code).toBe("agent_unavailable");
+    expect(apiErrorFrom(new RpcError("agent_not_ready", "x")).code).toBe("agent_unavailable");
     expect(apiErrorFrom(new RpcError("request_id_conflict", "x")).code).toBe("conflict");
     expect(apiErrorFrom(new RpcError("approval_already_resolved", "x")).code).toBe("already_resolved");
     expect(apiErrorFrom(new RpcError("approval_expired", "x")).code).toBe("expired");

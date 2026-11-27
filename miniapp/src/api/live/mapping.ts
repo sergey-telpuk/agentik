@@ -20,6 +20,7 @@ import type {
 import { TASK_STATES, isFinalState, type TaskState } from "../taskState";
 import type {
   Agent,
+  AgentModel,
   ApiError,
   ApprovalDecision,
   ApprovalRequest,
@@ -83,8 +84,65 @@ export function taskSummaryFromView(view: TaskView, lastSeq: number): TaskSummar
   };
 }
 
-/** Only Codex exists in the MVP; a computer that does not list it reports it as not installed. */
+const WIRE_AGENT_STATUS: Readonly<Record<string, Agent["status"]>> = {
+  ready: "available",
+  not_authenticated: "not_authorized",
+  not_installed: "not_installed",
+  unsupported: "unsupported",
+  unknown: "unknown",
+};
+
+const MAX_AGENTS = 20;
+const MAX_MODELS = 50;
+const MAX_NAME_CHARS = 128;
+const MAX_NOTE_CHARS = 300;
+
+function clip(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+
+function modelsFromInfo(info: AgentInfo): AgentModel[] {
+  const seen = new Set<string>();
+  const out: AgentModel[] = [];
+  for (const m of info.models ?? []) {
+    if (typeof m.id !== "string" || m.id === "" || seen.has(m.id)) continue;
+    seen.add(m.id);
+    out.push({
+      id: m.id,
+      name: clip(text(m.display_name) ?? m.id, MAX_NAME_CHARS),
+      description: text(m.description) === null ? null : clip(m.description ?? "", MAX_NOTE_CHARS),
+      isDefault: m.is_default === true,
+    });
+    if (out.length >= MAX_MODELS) break;
+  }
+  return out;
+}
+
+/**
+ * Agents from `agent.list`.
+ *
+ * A computer that detects every installed agent sends `status` on each entry;
+ * all of them are listed, and only `ready` ones can run a task. An older
+ * computer sends only the original fields and only Codex is known to exist:
+ * a computer that does not list it reports it as not installed.
+ */
 export function agentsFromInfo(list: readonly AgentInfo[]): Agent[] {
+  if (list.some((a) => a.status !== undefined)) {
+    return list.slice(0, MAX_AGENTS).map((a): Agent => {
+      const id = a.id ?? a.name;
+      const status = WIRE_AGENT_STATUS[a.status ?? ""] ?? "unknown";
+      const note = status === "available" && a.models_source === "static" ? (text(a.models_detail) ?? undefined) : undefined;
+      return {
+        id,
+        name: clip(text(a.display_name) ?? id, MAX_NAME_CHARS),
+        status,
+        version: a.version ?? null,
+        ...(text(a.status_text) !== null ? { statusText: clip(a.status_text ?? "", MAX_NOTE_CHARS) } : {}),
+        models: status === "available" ? modelsFromInfo(a) : [],
+        ...(note !== undefined ? { modelsNote: clip(note, MAX_NOTE_CHARS) } : {}),
+      };
+    });
+  }
   const codex = list.find((a) => a.name === "codex");
   const status: Agent["status"] =
     codex === undefined || !codex.available ? "not_installed" : !codex.authenticated ? "not_authorized" : "available";
@@ -254,7 +312,11 @@ export function apiErrorFrom(err: unknown): ApiError {
       case "approval_expired":
         return { code: "expired", message: "This request expired. The agent has to ask again." };
       case "agent_unavailable":
+      case "agent_unsupported":
+      case "agent_not_ready":
         return { code: "agent_unavailable", message: err.message };
+      case "unknown_model":
+        return { code: "invalid", message: err.message };
       case "unauthorized":
         return { code: "revoked", message: `The computer refused this phone: ${err.message}` };
       case "bad_request":
