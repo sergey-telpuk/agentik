@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -86,6 +87,9 @@ func withCatalog(m *modelAdapter, binDir string) func(*runtime.Config) {
 
 func fakeCLIs(t *testing.T) string {
 	t.Helper()
+	if goruntime.GOOS == "windows" {
+		t.Skip("shell-script fake binaries need a POSIX shell")
+	}
 	dir := t.TempDir()
 	write := func(name, body string) {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {

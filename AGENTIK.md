@@ -360,6 +360,8 @@ The Mini App displays only builds present in a verified release manifest. Each b
 
 Target build matrix: macOS ARM64/AMD64, Linux ARM64/AMD64, Windows AMD64/ARM64. A platform is declared supported only after testing, including with Codex installed. Successful cross-compilation is not confirmation of full support.
 
+Current state: the daemon targets macOS and Windows (AMD64). The terminal feature is not available on Windows yet; the daemon reports it as "not supported on this platform" and everything else is unchanged. Default data directory per platform: macOS `~/Library/Application Support/Agentik` (unchanged), Windows `%AppData%\Agentik`, other systems `$XDG_CONFIG_HOME/agentik`. On Windows the 0600/0700 file modes are not enforced; identity and database files are protected by the access control list inherited from the per-user `%AppData%` directory. Windows agent discovery looks for `.exe` and `.cmd` on `PATH`, then in `%AppData%\npm` and `%LocalAppData%\Programs`. The Windows binary is built unsigned in CI and published next to the macOS ones.
+
 Self-containment applies to Agentik. The user does not need a Go runtime; the third-party AI agent must be installed separately. Packaging may include a conventional installer around the binary.
 
 Update signing and the signature accepted by the operating system solve different problems. The macOS and Windows procedures for convenient installation are planned separately. A file's SHA-256 is not a substitute for a trusted release signature.

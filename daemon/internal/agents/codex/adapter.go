@@ -411,9 +411,7 @@ func (t *appServerTurn) forceStop() {
 	t.writeMu.Lock()
 	_ = t.stdin.Close()
 	t.writeMu.Unlock()
-	if t.cmd.Process != nil {
-		_ = t.cmd.Process.Kill()
-	}
+	killProcessTree(t.cmd.Process)
 }
 
 func (t *appServerTurn) readLoop() {

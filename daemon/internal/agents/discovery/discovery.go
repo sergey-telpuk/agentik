@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -125,6 +126,42 @@ func New(cfg Config) *Discoverer {
 // WellKnownDirs lists directories where agent CLIs are commonly installed,
 // for a service whose PATH is shorter than the user's shell PATH.
 func WellKnownDirs(home string) []string {
+	return wellKnownDirsFor(runtime.GOOS, home, os.Getenv("APPDATA"), os.Getenv("LOCALAPPDATA"))
+}
+
+// wellKnownDirsFor computes WellKnownDirs for goos. appData and localAppData
+// are the Windows %AppData% and %LocalAppData% values; they are ignored on
+// other systems and default to the usual locations under home when empty.
+func wellKnownDirsFor(goos, home, appData, localAppData string) []string {
+	if goos == "windows" {
+		if home != "" {
+			if appData == "" {
+				appData = filepath.Join(home, "AppData", "Roaming")
+			}
+			if localAppData == "" {
+				localAppData = filepath.Join(home, "AppData", "Local")
+			}
+		}
+		var dirs []string
+		if appData != "" {
+			// Global npm installs (npm i -g @openai/codex) put codex.cmd here.
+			dirs = append(dirs, filepath.Join(appData, "npm"))
+		}
+		if localAppData != "" {
+			dirs = append(dirs,
+				filepath.Join(localAppData, "Programs"),
+				filepath.Join(localAppData, "Microsoft", "WinGet", "Links"),
+			)
+		}
+		if home != "" {
+			dirs = append(dirs,
+				filepath.Join(home, ".local", "bin"),
+				filepath.Join(home, ".claude", "local"),
+				filepath.Join(home, ".bun", "bin"),
+			)
+		}
+		return dirs
+	}
 	dirs := []string{"/opt/homebrew/bin", "/usr/local/bin"}
 	if home != "" {
 		dirs = append(dirs,
@@ -136,6 +173,32 @@ func WellKnownDirs(home string) []string {
 		)
 	}
 	return dirs
+}
+
+// windowsExecutableExts are the file extensions Windows can start directly,
+// in the order they are tried. An extensionless file, such as the POSIX shell
+// shim npm also writes next to codex.cmd, cannot be started on Windows.
+var windowsExecutableExts = []string{".exe", ".cmd"}
+
+// hasWindowsExecutableExt reports whether name already ends in an extension
+// Windows can start (case-insensitive).
+func hasWindowsExecutableExt(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	return ext == ".exe" || ext == ".cmd" || ext == ".bat" || ext == ".com"
+}
+
+// executableNames lists the file names to try for a command name: the name
+// itself on Unix, and the name with .exe then .cmd on Windows unless it already
+// carries an executable extension.
+func executableNames(goos, name string) []string {
+	if goos != "windows" || hasWindowsExecutableExt(name) {
+		return []string{name}
+	}
+	out := make([]string, 0, len(windowsExecutableExts))
+	for _, ext := range windowsExecutableExts {
+		out = append(out, name+ext)
+	}
+	return out
 }
 
 // Discover looks for every candidate and returns the detected ones in the
@@ -176,9 +239,11 @@ func (d *Discoverer) locate(c Candidate) string {
 		names = []string{o}
 	}
 	for _, name := range names {
-		if strings.ContainsRune(name, filepath.Separator) {
-			if isExecutableFile(name) {
-				return name
+		if strings.ContainsRune(name, filepath.Separator) || strings.ContainsRune(name, '/') {
+			for _, n := range executableNames(runtime.GOOS, name) {
+				if isExecutableFile(n) {
+					return n
+				}
 			}
 			continue
 		}
@@ -189,9 +254,11 @@ func (d *Discoverer) locate(c Candidate) string {
 				// never run a binary from there.
 				continue
 			}
-			p := filepath.Join(dir, name)
-			if isExecutableFile(p) {
-				return p
+			for _, n := range executableNames(runtime.GOOS, name) {
+				p := filepath.Join(dir, n)
+				if isExecutableFile(p) {
+					return p
+				}
 			}
 		}
 	}
@@ -202,6 +269,10 @@ func isExecutableFile(path string) bool {
 	fi, err := os.Stat(path)
 	if err != nil || !fi.Mode().IsRegular() {
 		return false
+	}
+	if runtime.GOOS == "windows" {
+		// Windows has no execute bit: the extension decides.
+		return hasWindowsExecutableExt(path)
 	}
 	return fi.Mode().Perm()&0o111 != 0
 }

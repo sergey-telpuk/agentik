@@ -290,3 +290,31 @@ func TestSaveCreatesOwnerOnlyDirectory(t *testing.T) {
 	}
 	var _ fs.FileMode = dirMode
 }
+
+func TestDefaultDirPerPlatform(t *testing.T) {
+	home := func() (string, error) { return filepath.Join("home", "me"), nil }
+	cfg := func() (string, error) { return filepath.Join("cfg"), nil }
+	failing := func() (string, error) { return "", errors.New("unset") }
+
+	cases := []struct {
+		goos string
+		want string
+	}{
+		// macOS keeps its existing location so stored data is not orphaned.
+		{"darwin", filepath.Join("home", "me", "Library", "Application Support", "Agentik")},
+		{"windows", filepath.Join("cfg", "Agentik")},
+		{"linux", filepath.Join("cfg", "agentik")},
+	}
+	for _, c := range cases {
+		got, err := defaultDirFor(c.goos, home, cfg)
+		if err != nil || got != c.want {
+			t.Errorf("%s: got %q, %v; want %q", c.goos, got, err, c.want)
+		}
+	}
+	if _, err := defaultDirFor("darwin", failing, cfg); err == nil {
+		t.Error("darwin: missing home directory must be an error")
+	}
+	if _, err := defaultDirFor("windows", home, failing); err == nil {
+		t.Error("windows: missing config directory must be an error")
+	}
+}

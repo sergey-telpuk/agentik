@@ -21,7 +21,9 @@ import (
 const driverName = "sqlite"
 
 // dbFileMode keeps the database readable only by its owner: it holds task
-// history and prompts.
+// history and prompts. On Windows the mode is not enforced (Go maps it only to
+// the read-only attribute); the file is protected by the ACL it inherits from
+// the per-user %AppData% directory.
 const dbFileMode = 0o600
 
 // migration is one ordered, irreversible schema step.

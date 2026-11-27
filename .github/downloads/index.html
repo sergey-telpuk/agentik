@@ -12,11 +12,12 @@
 </style>
 </head>
 <body>
-<h1>Agentik daemon for macOS</h1>
+<h1>Agentik daemon for macOS and Windows</h1>
 <p>Version: <code>@VERSION@</code></p>
 <ul>
   <li><a href="agentik-darwin-arm64">agentik-darwin-arm64</a> - Apple Silicon (M1 and later)</li>
   <li><a href="agentik-darwin-amd64">agentik-darwin-amd64</a> - Intel</li>
+  <li><a href="agentik-windows-amd64.exe">agentik-windows-amd64.exe</a> - Windows 10/11, 64-bit</li>
   <li><a href="SHA256SUMS">SHA256SUMS</a> - checksums</li>
   <li><a href="README.txt">README.txt</a> - how to verify and run</li>
 </ul>
@@ -25,5 +26,8 @@ Downloading with curl avoids the macOS quarantine prompt:</p>
 <pre>curl -fLO https://sergey-telpuk.github.io/agentik/downloads/agentik-darwin-arm64
 chmod +x agentik-darwin-arm64
 ./agentik-darwin-arm64 -pair</pre>
+<p>Windows: verify with <code>certutil -hashfile agentik-windows-amd64.exe SHA256</code>.
+SmartScreen may warn about an unsigned program: click More info, then Run anyway.
+The terminal feature is not available on Windows yet.</p>
 </body>
 </html>
