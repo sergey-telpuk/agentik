@@ -268,6 +268,20 @@ describe("App flows on mock data", () => {
     expect(find("Start task").disabled).toBe(true);
   });
 
+  it("opens Settings from a computer screen and returns home after clearing local data", async () => {
+    await render("offline");
+    await click("Work MacBook", 3000);
+    expect(container.textContent).toContain("connection failed");
+    await click("Settings and diagnostics", 10);
+    expect(heading()).toBe("Settings");
+    await click("Clear local pinned data");
+    await click("Clear data", 10);
+    expect(container.textContent).toContain("Local pinned data cleared.");
+    await click("Back", 10);
+    expect(heading()).toBe("Computers");
+    expect(container.textContent).toContain("No computers paired yet.");
+  });
+
   it("shows diagnostics and clears local data after confirmation", async () => {
     await render("happy");
     await click("Settings and diagnostics", 10);

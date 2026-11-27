@@ -445,7 +445,16 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
       // resetAll does not validate the stored index, so this also recovers a corrupt one.
       const reset = await options.store.resetAll();
       if (!reset.ok) return fail(storeErrorCode(reset.code), reset.message);
-      return ok(null);
+      // The pins above were made for the old phone key, so regenerating it now
+      // cannot leave a pin behind. A valid or absent key is kept as it is.
+      const identity = await (await options.openIdentityStore()).resetIfCorrupt();
+      if (!identity.ok) {
+        return fail(
+          storeErrorCode(identity.code),
+          `Pinned computers were cleared, but the phone key could not be checked: ${identity.message}.`,
+        );
+      }
+      return ok({ phoneKeyRegenerated: identity.value.regenerated });
     },
   };
 }

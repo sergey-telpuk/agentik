@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AgentikApi, Diagnostics, StorageAvailability } from "../api/types";
+import type { AgentikApi, ClearLocalDataResult, Diagnostics, StorageAvailability } from "../api/types";
 import { sentence } from "./format";
 import { ConfirmDialog, Notice, Page, Section, SkeletonList, StatusChip, useBusy, type Tone } from "./kit";
 
@@ -34,7 +34,7 @@ export function SettingsScreen({ api, scenarios, onCleared, onBack }: Props) {
   const [reload, setReload] = useState(0);
   const [confirm, setConfirm] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [cleared, setCleared] = useState(false);
+  const [cleared, setCleared] = useState<ClearLocalDataResult | null>(null);
   const [busy, run] = useBusy();
 
   useEffect(() => {
@@ -51,7 +51,7 @@ export function SettingsScreen({ api, scenarios, onCleared, onBack }: Props) {
     const result = await api.clearLocalData();
     if (result.ok) {
       setConfirm(false);
-      setCleared(true);
+      setCleared(result.value);
       setReload((n) => n + 1);
       onCleared();
     } else {
@@ -127,14 +127,17 @@ export function SettingsScreen({ api, scenarios, onCleared, onBack }: Props) {
           <Section title="Local data">
             <p className="hint">
               Removes every pinned computer from this phone. Computers keep their own record of this phone until you
-              revoke it on them.
+              revoke it on them. If the phone&apos;s own key is unreadable, it is replaced with a new one; a readable key
+              is kept.
             </p>
             <button type="button" className="button button-destructive-outline button-block" onClick={() => setConfirm(true)}>
               Clear local pinned data
             </button>
-            {cleared && (
+            {cleared !== null && (
               <p className="hint" role="status">
                 Local pinned data cleared.
+                {cleared.phoneKeyRegenerated &&
+                  " The phone key could not be read, so a new one was generated. Every computer must pair this phone again."}
               </p>
             )}
           </Section>

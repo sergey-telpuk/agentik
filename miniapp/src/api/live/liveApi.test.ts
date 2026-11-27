@@ -624,3 +624,115 @@ describe("live AgentikApi: tasks over the inner protocol", () => {
     expect((await api.pairComputer(f.invitation)).ok).toBe(true);
   });
 });
+
+const IDENTITY_KEY = "agentik_phone_identity_v1";
+
+/** A secure channel that records every phone key it is opened with. */
+function recordingChannel(daemon: ReturnType<typeof plainDaemon>): {
+  readonly channel: SecureChannelFactory;
+  readonly keys: Uint8Array[];
+} {
+  const keys: Uint8Array[] = [];
+  return {
+    keys,
+    channel: {
+      open: (params) => {
+        keys.push(params.clientStaticPrivateKey);
+        return daemon.secureChannel.open(params);
+      },
+    },
+  };
+}
+
+async function storedIdentity(f: Fixture): Promise<NoiseKeyPair | null> {
+  const loaded = await (await PhoneIdentityStore.open({ secure: f.backend, device: null })).getOrCreate();
+  return loaded.ok ? loaded.value : null;
+}
+
+describe("live AgentikApi: recovering a corrupt phone identity", () => {
+  it("regenerates a corrupt phone identity on clearLocalData and connects with the new key, never the old pins", async () => {
+    const f = await fixture();
+    await pinConfirmed(f);
+    f.backend.data.set(IDENTITY_KEY, "{bad");
+    const daemon = plainDaemon(paired(() => undefined));
+    const recorded = recordingChannel(daemon);
+    const relay = attachingRelay();
+    const api = liveApi(f, { createRelayClient: relay.createRelayClient, secureChannel: recorded.channel });
+    const id = f.invitation.deviceIdText;
+
+    const broken = track(api, id);
+    await until(() => last(broken.states)?.phase === "failed", "failure on the corrupt identity");
+    expect(recorded.keys).toHaveLength(0);
+    broken.stop();
+
+    const cleared = await api.clearLocalData();
+    expect(cleared.ok).toBe(true);
+    const regenerated = await storedIdentity(f);
+    expect(regenerated).not.toBeNull();
+    expect(f.backend.data.get(IDENTITY_KEY)).not.toBe("{bad");
+    expect(cleared.ok && cleared.value).toEqual({ phoneKeyRegenerated: true });
+
+    // The pins made for the old key are gone: connecting to that computer must not reach the relay.
+    const socketsBefore = relay.sockets.length;
+    const stale = track(api, id);
+    await until(() => last(stale.states)?.phase === "failed", "failure without a pin");
+    expect(last(stale.states)).toMatchObject({ phase: "failed", message: expect.stringContaining("not paired") });
+    expect(relay.sockets).toHaveLength(socketsBefore);
+    expect(recorded.keys).toHaveLength(0);
+    stale.stop();
+
+    // Pairing again works and the session is opened with the regenerated key.
+    expect((await api.pairComputer(f.invitation)).ok).toBe(true);
+    await f.store.markConfirmed(id);
+    const fresh = track(api, id);
+    await until(() => last(fresh.states)?.phase === "ready", "ready with the new key");
+    expect(recorded.keys).toHaveLength(1);
+    expect(recorded.keys[0]).toEqual(regenerated?.privateKey);
+  });
+
+  it("keeps a valid phone identity when clearing local data", async () => {
+    const f = await fixture();
+    await pinConfirmed(f);
+    const before = await storedIdentity(f);
+    expect(before).not.toBeNull();
+    const rawBefore = f.backend.data.get(IDENTITY_KEY);
+    const api = liveApi(f, {
+      createRelayClient: attachingRelay().createRelayClient,
+      secureChannel: plainDaemon(paired(() => undefined)).secureChannel,
+    });
+
+    const cleared = await api.clearLocalData();
+    expect(cleared.ok && cleared.value).toEqual({ phoneKeyRegenerated: false });
+    expect(f.backend.data.get(IDENTITY_KEY)).toBe(rawBefore);
+    expect(await storedIdentity(f)).toEqual(before);
+  });
+
+  it("does not create an identity on clearLocalData when none is stored", async () => {
+    const f = await fixture();
+    const api = liveApi(f, {
+      createRelayClient: attachingRelay().createRelayClient,
+      secureChannel: plainDaemon(paired(() => undefined)).secureChannel,
+    });
+    const cleared = await api.clearLocalData();
+    expect(cleared.ok && cleared.value).toEqual({ phoneKeyRegenerated: false });
+    expect(f.backend.data.has(IDENTITY_KEY)).toBe(false);
+  });
+
+  it("tells the user to use Settings when the phone identity is corrupt", async () => {
+    const f = await fixture();
+    await pinConfirmed(f);
+    f.backend.data.set(IDENTITY_KEY, "{bad");
+    const api = liveApi(f, {
+      createRelayClient: attachingRelay().createRelayClient,
+      secureChannel: plainDaemon(paired(() => undefined)).secureChannel,
+    });
+    const { states } = track(api, f.invitation.deviceIdText);
+    await until(() => last(states)?.phase === "failed", "failure");
+    const failed = last(states);
+    expect(failed).toMatchObject({ phase: "failed", retryable: false });
+    const message = failed?.phase === "failed" ? failed.message : "";
+    expect(message).toContain("cannot load its own key");
+    expect(message).toContain("Settings");
+    expect(message).toContain("Clear local pinned data");
+  });
+});

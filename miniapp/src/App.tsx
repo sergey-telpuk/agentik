@@ -103,10 +103,19 @@ export function App({ services: provided }: Props) {
 
   const push = useCallback((next: Route) => setStack((s) => [...s, next]), []);
   const replace = useCallback((next: Route) => setStack((s) => [...s.slice(0, -1), next]), []);
-  const back = useCallback(() => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)), []);
+  // Set when Settings cleared the pinned data: the computer screens below it describe pins that no longer exist.
+  const clearedRef = useRef(false);
   const home = useCallback(() => {
+    clearedRef.current = false;
     setListKey((n) => n + 1);
     setStack([HOME]);
+  }, []);
+  const back = useCallback(() => {
+    if (clearedRef.current) home();
+    else setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
+  }, [home]);
+  const cleared = useCallback(() => {
+    clearedRef.current = true;
   }, []);
 
   // One secure session at a time, kept while any screen of that computer is open.
@@ -185,6 +194,7 @@ export function App({ services: provided }: Props) {
           back={back}
           home={home}
           retry={retry}
+          cleared={cleared}
         />
       )}
     </main>
@@ -203,9 +213,10 @@ interface ScreenProps {
   readonly back: () => void;
   readonly home: () => void;
   readonly retry: () => void;
+  readonly cleared: () => void;
 }
 
-function Screen({ route, ready, services, connection, listKey, scenarios, push, replace, back, home, retry }: ScreenProps) {
+function Screen({ route, ready, services, connection, listKey, scenarios, push, replace, back, home, retry, cleared }: ScreenProps) {
   const { api, store } = ready;
   const now = services.now;
   switch (route.name) {
@@ -231,7 +242,7 @@ function Screen({ route, ready, services, connection, listKey, scenarios, push, 
     case "pair":
       return <PairScreen services={services} api={api} persistence={store.persistence} onPinned={home} onCancel={back} />;
     case "settings":
-      return <SettingsScreen api={api} scenarios={scenarios} onCleared={() => undefined} onBack={back} />;
+      return <SettingsScreen api={api} scenarios={scenarios} onCleared={cleared} onBack={back} />;
     case "computer":
       return (
         <ComputerScreen
@@ -239,6 +250,7 @@ function Screen({ route, ready, services, connection, listKey, scenarios, push, 
           computer={route.computer}
           connection={connection}
           onRetry={retry}
+          onSettings={() => push({ name: "settings" })}
           onForget={() => {
             void api.forgetComputer(route.computer.id).then(home);
           }}

@@ -14,6 +14,8 @@ import type { AvailableBackends } from "./telegramBackends";
 
 const IDENTITY_KEY = "agentik_phone_identity_v1";
 const PROBE_KEY = "agentik_probe";
+const CORRUPT_IDENTITY_MESSAGE =
+  'the stored phone identity is corrupt; open Settings and use "Clear local pinned data" to reset it';
 
 interface StoredPhoneIdentity {
   readonly v: 1;
@@ -94,36 +96,68 @@ export class PhoneIdentityStore {
           return {
             ok: false,
             code: "corrupt_record",
-            message: "the stored phone identity is corrupt",
+            message: CORRUPT_IDENTITY_MESSAGE,
           };
         }
         return { ok: true, value: parsed };
       }
 
-      const generated = await keygen();
-      if (
-        generated.privateKey.length !== NOISE_KEY_SIZE ||
-        generated.publicKey.length !== NOISE_KEY_SIZE
-      ) {
-        return {
-          ok: false,
-          code: "storage_failed",
-          message: "generated identity has an invalid key length",
-        };
-      }
-      const record: StoredPhoneIdentity = {
-        v: 1,
-        private_key: encodeBase64Url(generated.privateKey),
-        public_key: encodeBase64Url(generated.publicKey),
-      };
-      const encoded = JSON.stringify(record);
-      if (encoded.length > MAX_VALUE_LENGTH) {
-        return { ok: false, code: "storage_failed", message: "identity record is too large" };
-      }
-      await backend.set(IDENTITY_KEY, encoded);
-      return { ok: true, value: generated };
+      return await this.#generateAndSave(backend, keygen);
     } catch {
       return { ok: false, code: "storage_failed", message: "saving the phone identity failed" };
     }
+  }
+
+  /**
+   * Recovery for an unreadable phone identity. Only an explicit user action may
+   * call this: it replaces the stored identity with a NEW keypair, so every
+   * computer that knew the old public key must pair this phone again.
+   *
+   * A valid or absent identity is left untouched (`regenerated: false`); a
+   * backend failure while reading is reported, never treated as corruption.
+   */
+  async resetIfCorrupt(
+    keygen: () => Promise<NoiseKeyPair> = () => generateNoiseKeyPair(),
+  ): Promise<StoreResult<{ readonly regenerated: boolean }>> {
+    const backend = this.#backend;
+    if (backend === null) {
+      return {
+        ok: false,
+        code: "persistence_unsupported",
+        message: "persistent access is not supported on this device",
+      };
+    }
+    try {
+      const existing = await backend.get(IDENTITY_KEY);
+      if (existing === null || parseIdentityRecord(existing) !== null) {
+        return { ok: true, value: { regenerated: false } };
+      }
+      const saved = await this.#generateAndSave(backend, keygen);
+      return saved.ok ? { ok: true, value: { regenerated: true } } : saved;
+    } catch {
+      return { ok: false, code: "storage_failed", message: "resetting the phone identity failed" };
+    }
+  }
+
+  /** Generates a keypair and writes it through the identity backend only. Throws on backend errors. */
+  async #generateAndSave(
+    backend: KeyValueBackend,
+    keygen: () => Promise<NoiseKeyPair>,
+  ): Promise<StoreResult<NoiseKeyPair>> {
+    const generated = await keygen();
+    if (generated.privateKey.length !== NOISE_KEY_SIZE || generated.publicKey.length !== NOISE_KEY_SIZE) {
+      return { ok: false, code: "storage_failed", message: "generated identity has an invalid key length" };
+    }
+    const record: StoredPhoneIdentity = {
+      v: 1,
+      private_key: encodeBase64Url(generated.privateKey),
+      public_key: encodeBase64Url(generated.publicKey),
+    };
+    const encoded = JSON.stringify(record);
+    if (encoded.length > MAX_VALUE_LENGTH) {
+      return { ok: false, code: "storage_failed", message: "identity record is too large" };
+    }
+    await backend.set(IDENTITY_KEY, encoded);
+    return { ok: true, value: generated };
   }
 }

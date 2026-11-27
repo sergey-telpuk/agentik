@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Agent, AgentikApi, Computer, ConnectionState, Project } from "../api/types";
 import { CONNECTION_STEPS, connectionText, sentence, shortId } from "./format";
-import { ConfirmDialog, Empty, Notice, Page, Section, SkeletonList, StatusChip } from "./kit";
+import { ConfirmDialog, Empty, Notice, Page, Section, SettingsButton, SkeletonList, StatusChip } from "./kit";
 
 interface Props {
   readonly api: AgentikApi;
@@ -9,6 +9,7 @@ interface Props {
   readonly connection: ConnectionState | null;
   readonly onRetry: () => void;
   readonly onForget: () => void;
+  readonly onSettings: () => void;
   readonly onOpenProject: (project: Project) => void;
   readonly onBack: () => void;
 }
@@ -45,7 +46,7 @@ function ConnectionProgress({ connection, skipConfirm }: { connection: Connectio
   );
 }
 
-export function ComputerScreen({ api, computer, connection, onRetry, onForget, onOpenProject, onBack }: Props) {
+export function ComputerScreen({ api, computer, connection, onRetry, onForget, onSettings, onOpenProject, onBack }: Props) {
   const [loaded, setLoaded] = useState<Loaded>({ kind: "loading" });
   const [confirmingForget, setConfirmingForget] = useState(false);
   const ready = connection?.phase === "ready";
@@ -70,7 +71,7 @@ export function ComputerScreen({ api, computer, connection, onRetry, onForget, o
   const codex = loaded.kind === "ready" ? loaded.agents.find((a) => a.id === "codex") : undefined;
 
   return (
-    <Page title={name} subtitle={shortId(computer.id)} onBack={onBack}>
+    <Page title={name} subtitle={shortId(computer.id)} onBack={onBack} actions={<SettingsButton onClick={onSettings} />}>
       <div className={`connection connection-${text.tone}`} aria-live="polite">
         <div className="connection-head">
           <StatusChip tone={text.tone} label={text.label} pulse={inProgress} />

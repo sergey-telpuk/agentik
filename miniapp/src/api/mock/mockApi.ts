@@ -720,7 +720,7 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
         const removed = await options.store.remove(device.deviceId);
         if (!removed.ok) return fail(storeErrorCode(removed.code), removed.message);
       }
-      return ok(null);
+      return ok({ phoneKeyRegenerated: false });
     },
   };
 }

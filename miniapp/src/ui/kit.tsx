@@ -48,6 +48,23 @@ export function Page({ title, subtitle, onBack, actions, footer, children }: Pag
   );
 }
 
+/** The gear that opens Settings; shared by every screen that offers it. */
+export function SettingsButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" className="icon-button" onClick={onClick} aria-label="Settings and diagnostics">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path
+          d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm7.4-2.1.1-1.4-.1-1.4 2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-2.4-1.4L14.2 3h-4l-.4 2.7a7.6 7.6 0 0 0-2.4 1.4l-2.4-1-2 3.4 2 1.6-.1 1.4.1 1.4-2 1.6 2 3.4 2.4-1c.7.6 1.5 1 2.4 1.4l.4 2.7h4l.4-2.7c.9-.3 1.7-.8 2.4-1.4l2.4 1 2-3.4-2-1.6Z"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </button>
+  );
+}
+
 /** A status label with a coloured dot. The text carries the meaning; colour only repeats it. */
 export function StatusChip({ tone, label, pulse = false }: { tone: Tone; label: string; pulse?: boolean }) {
   return (

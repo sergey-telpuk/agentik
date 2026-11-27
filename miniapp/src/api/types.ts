@@ -254,6 +254,14 @@ export type Unsubscribe = () => void;
  * through the secure session opened by `connect`; calls made without a ready
  * session fail with `not_connected` instead of being queued.
  */
+export interface ClearLocalDataResult {
+  /**
+   * True when the stored phone key was unreadable and a new one was generated.
+   * Every computer must then pair this phone again, because the key changed.
+   */
+  readonly phoneKeyRegenerated: boolean;
+}
+
 export interface AgentikApi {
   /** `mock` while the UI runs on demo data; the UI labels it as such. */
   readonly backend: "mock" | "live";
@@ -289,6 +297,9 @@ export interface AgentikApi {
   respondApproval(computerId: string, input: RespondApprovalInput): Promise<ApiResult<ApprovalOutcome>>;
   getResult(computerId: string, taskId: string): Promise<ApiResult<TaskResult>>;
   getDiagnostics(): Promise<Diagnostics>;
-  /** Removes every pin stored on this phone. */
-  clearLocalData(): Promise<ApiResult<null>>;
+  /**
+   * Removes every pin stored on this phone. A phone key that cannot be read is
+   * replaced with a new one; a valid key is kept.
+   */
+  clearLocalData(): Promise<ApiResult<ClearLocalDataResult>>;
 }

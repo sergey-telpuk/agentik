@@ -73,4 +73,54 @@ describe("PhoneIdentityStore", () => {
     const store = await PhoneIdentityStore.open({ secure: backend, device: null });
     expect(await store.getOrCreate()).toMatchObject({ ok: false, code: "corrupt_record" });
   });
+
+  it("resetIfCorrupt replaces an unreadable identity with a new keypair, in the identity backend only", async () => {
+    for (const corrupt of ["{bad", "null", '{"v":2}', '{"v":1,"private_key":"AA","public_key":"AA"}']) {
+      const backend = new MemoryBackend("secure");
+      backend.data.set("agentik_phone_identity_v1", corrupt);
+      const store = await PhoneIdentityStore.open({ secure: backend, device: null });
+      expect(await store.getOrCreate()).toMatchObject({ ok: false, code: "corrupt_record" });
+
+      expect(await store.resetIfCorrupt()).toEqual({ ok: true, value: { regenerated: true } });
+      const loaded = await store.getOrCreate();
+      expect(loaded.ok).toBe(true);
+      if (loaded.ok) {
+        expect(loaded.value.privateKey).toHaveLength(32);
+        expect(loaded.value.publicKey).toHaveLength(32);
+      }
+      expect(backend.data.get("agentik_phone_identity_v1")).not.toBe(corrupt);
+    }
+    expect(local.writes).toEqual([]);
+    expect(session.writes).toEqual([]);
+  });
+
+  it("resetIfCorrupt keeps a valid identity and does not create a missing one", async () => {
+    const backend = new MemoryBackend("secure");
+    const store = await PhoneIdentityStore.open({ secure: backend, device: null });
+    expect(await store.resetIfCorrupt()).toEqual({ ok: true, value: { regenerated: false } });
+    expect(backend.data.has("agentik_phone_identity_v1")).toBe(false);
+
+    const created = await store.getOrCreate();
+    const raw = backend.data.get("agentik_phone_identity_v1");
+    expect(await store.resetIfCorrupt()).toEqual({ ok: true, value: { regenerated: false } });
+    expect(backend.data.get("agentik_phone_identity_v1")).toBe(raw);
+    expect(await store.getOrCreate()).toEqual(created);
+  });
+
+  it("resetIfCorrupt reports storage failures instead of treating them as corruption", async () => {
+    const backend = new MemoryBackend("secure");
+    backend.data.set("agentik_phone_identity_v1", "{bad");
+    const store = await PhoneIdentityStore.open({ secure: backend, device: null });
+    backend.failGet = true;
+    expect(await store.resetIfCorrupt()).toMatchObject({ ok: false, code: "storage_failed" });
+    backend.failGet = false;
+    backend.failSet = true;
+    expect(await store.resetIfCorrupt()).toMatchObject({ ok: false, code: "storage_failed" });
+    expect(backend.data.get("agentik_phone_identity_v1")).toBe("{bad");
+
+    const unsupported = await PhoneIdentityStore.open({ secure: null, device: null });
+    expect(await unsupported.resetIfCorrupt()).toMatchObject({ ok: false, code: "persistence_unsupported" });
+    expect(local.writes).toEqual([]);
+    expect(session.writes).toEqual([]);
+  });
 });

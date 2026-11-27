@@ -3,7 +3,7 @@ import type { AgentikApi, Computer } from "../api/types";
 import agentikIcon from "../assets/agentik-icon.svg";
 import type { PersistenceState } from "../storage/pinnedDevices";
 import { sentence, shortId } from "./format";
-import { Empty, Notice, Page, SkeletonList } from "./kit";
+import { Empty, Notice, Page, SettingsButton, SkeletonList } from "./kit";
 
 interface Props {
   readonly api: AgentikApi;
@@ -39,19 +39,7 @@ export function ComputersScreen({ api, persistence, onAdd, onOpen, onSettings }:
     <Page
       title="Computers"
       subtitle="Paired with this phone"
-      actions={
-        <button type="button" className="icon-button" onClick={onSettings} aria-label="Settings and diagnostics">
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
-            <path
-              d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm7.4-2.1.1-1.4-.1-1.4 2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-2.4-1.4L14.2 3h-4l-.4 2.7a7.6 7.6 0 0 0-2.4 1.4l-2.4-1-2 3.4 2 1.6-.1 1.4.1 1.4-2 1.6 2 3.4 2.4-1c.7.6 1.5 1 2.4 1.4l.4 2.7h4l.4-2.7c.9-.3 1.7-.8 2.4-1.4l2.4 1 2-3.4-2-1.6Z"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
-      }
+      actions={<SettingsButton onClick={onSettings} />}
       footer={
         <button type="button" className="button button-primary button-block" onClick={onAdd} disabled={unsupported}>
           Connect a computer
