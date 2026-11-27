@@ -449,11 +449,15 @@ export class DeviceRoom implements DurableObject {
       return;
     }
 
+    // Messages that arrived during verification counted toward the rate
+    // limit in the attachment, so the counters are taken from it, not from
+    // the state read before the awaits.
+    const latest = readState(ws) ?? consumed;
     const previous = this.#sockets("device").filter((other) => other !== ws);
     writeState(ws, {
       role: "device",
-      windowStart: state.windowStart,
-      windowCount: state.windowCount,
+      windowStart: latest.windowStart,
+      windowCount: latest.windowCount,
     });
 
     // Proof of the same key replaces an older device connection. An

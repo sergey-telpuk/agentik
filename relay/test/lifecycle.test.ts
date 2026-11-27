@@ -325,6 +325,27 @@ describe("registration races", () => {
     peer.close();
   });
 
+  it("keeps the rate-limit count of messages that arrive during verification", async () => {
+    const device = await createDevice();
+    const peer = await TestPeer.connect(device.deviceIdText);
+    const challenge = await peer.challenge();
+    const register = await buildRegister(device, { challenge });
+
+    await deliverConcurrently(device, challenge, [register, register]);
+    await peer.next();
+    await peer.next();
+
+    const counts = await runInDurableObject(roomFor(device), (_i, state) =>
+      state
+        .getWebSockets()
+        .map((s) => s.deserializeAttachment() as Attachment)
+        .filter((a) => a["role"] === "device")
+        .map((a) => a["windowCount"]),
+    );
+    expect(counts).toEqual([2]);
+    peer.close();
+  });
+
   it("refuses an attach that overlaps a registration on one socket", async () => {
     const device = await createDevice();
     const peer = await TestPeer.connect(device.deviceIdText);
