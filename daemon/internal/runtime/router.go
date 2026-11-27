@@ -90,6 +90,7 @@ func NewHub(
 			h.mu.Lock()
 			delete(h.sessions, connectionID)
 			h.mu.Unlock()
+			rt.CloseTerminalsForConnection(connectionID)
 		},
 		OnMessage: func(ctx context.Context, sess *secure.ManagedSession, plaintext []byte) {
 			rt.HandleMessage(ctx, sess, plaintext)
@@ -146,6 +147,7 @@ func (h *Hub) RevokePeer(ctx context.Context, peerStatic []byte) error {
 	if err := h.pairing.RevokeByKey(ctx, peerStatic); err != nil {
 		return err
 	}
+	h.runtime.CloseTerminalsForPeer(peerStatic)
 	h.manager.RevokePeer(peerStatic)
 	return nil
 }

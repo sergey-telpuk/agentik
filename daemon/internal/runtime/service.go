@@ -23,6 +23,7 @@ import (
 	"github.com/sergey-telpuk/agentik/daemon/internal/protocol"
 	"github.com/sergey-telpuk/agentik/daemon/internal/secure"
 	"github.com/sergey-telpuk/agentik/daemon/internal/storage"
+	"github.com/sergey-telpuk/agentik/daemon/internal/terminal"
 )
 
 const (
@@ -69,6 +70,10 @@ type Config struct {
 	// Catalog lists detected agents and validates agent and model choices.
 	// When nil, a catalogue over Agents (without CLI discovery) is used.
 	Catalog *agents.Registry
+
+	// Terminal configures remote terminal sessions; the zero value uses the
+	// login shell, the daemon's environment and the default idle timeout.
+	Terminal terminal.Config
 }
 
 type approvalWaiter struct {
@@ -107,6 +112,8 @@ type Service struct {
 	mu          sync.Mutex
 	activeTurns map[string]codex.ActiveTurn
 	approvals   map[string]*approvalWaiter
+
+	terminals *terminal.Manager
 }
 
 // NewService constructs the runtime, syncs the configured projects into SQLite,
@@ -161,6 +168,7 @@ func NewService(ctx context.Context, cfg Config) (*Service, error) {
 		cancel:           cancel,
 		activeTurns:      make(map[string]codex.ActiveTurn),
 		approvals:        make(map[string]*approvalWaiter),
+		terminals:        terminal.NewManager(cfg.Terminal),
 	}
 
 	if err := svc.syncProjects(ctx); err != nil {
@@ -177,6 +185,7 @@ func NewService(ctx context.Context, cfg Config) (*Service, error) {
 // Close cancels in-flight runtime work and waits for active task goroutines.
 func (s *Service) Close() {
 	s.cancel()
+	s.terminals.CloseAll(terminal.ReasonShutdown)
 
 	s.mu.Lock()
 	for _, w := range s.approvals {
@@ -388,6 +397,8 @@ func (s *Service) HandleMessage(ctx context.Context, sess *secure.ManagedSession
 		s.handleEventsResume(ctx, sess, req)
 	case "changes.get":
 		s.handleChangesGet(ctx, sess, req)
+	case "terminal.open", "terminal.input", "terminal.resize", "terminal.read", "terminal.close":
+		s.handleTerminal(ctx, sess, req)
 	default:
 		s.sendError(ctx, sess, req.RequestID, "bad_request", fmt.Sprintf("unknown method %q", req.Method))
 	}

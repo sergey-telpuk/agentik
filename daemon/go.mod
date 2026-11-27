@@ -4,7 +4,9 @@ go 1.27.4
 
 require (
 	github.com/coder/websocket v1.8.14
+	github.com/creack/pty v1.1.24
 	github.com/flynn/noise v1.1.0
+	golang.org/x/sys v0.49.0
 	modernc.org/sqlite v1.63.0
 	rsc.io/qr v0.2.0
 )
@@ -16,7 +18,6 @@ require (
 	github.com/ncruces/go-strftime v1.1.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/crypto v0.0.0-20210322153248-0c34fe9e7dc2 // indirect
-	golang.org/x/sys v0.49.0 // indirect
 	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
