@@ -15,6 +15,7 @@ import type { PinnedDevice, PinnedDeviceStore, StoreErrorCode } from "../../stor
 import type { TelegramRuntime } from "../../telegram/runtime";
 import { conversationsFromTasks, mergeConversations } from "../conversations";
 import { canRequestCancel, isFinalState, transition, type TaskState } from "../taskState";
+import { createFakeTerminals } from "./fakeTerminal";
 import {
   MAX_PROMPT_LENGTH,
   type Agent,
@@ -480,8 +481,20 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
     ];
   }
 
+  const terminals = createFakeTerminals({
+    projects: async (computerId) => {
+      const record = await session(computerId);
+      return record.ok ? ok(record.value.projects) : record;
+    },
+  });
+
   return {
     backend: "mock",
+    openTerminal: terminals.openTerminal,
+    sendTerminalInput: terminals.sendTerminalInput,
+    resizeTerminal: terminals.resizeTerminal,
+    closeTerminal: terminals.closeTerminal,
+    streamTerminal: terminals.streamTerminal,
 
     async listComputers() {
       const fromStore = await pinnedRecords();

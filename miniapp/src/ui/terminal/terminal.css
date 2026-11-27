@@ -1,0 +1,21 @@
+.terminal-host {
+  height: min(60vh, 520px);
+  min-height: 220px;
+  padding: 6px;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #1e1e1e;
+}
+
+.terminal-keys {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.terminal-key {
+  flex: 0 0 auto;
+  min-width: 44px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

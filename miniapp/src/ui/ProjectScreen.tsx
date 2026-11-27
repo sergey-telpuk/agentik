@@ -13,6 +13,8 @@ interface Props {
   readonly onNewTask: () => void;
   /** Opens the conversation a task belongs to. */
   readonly onOpenSession: (sessionId: string) => void;
+  /** Opens a shell in this project on the computer. */
+  readonly onOpenTerminal?: () => void;
   readonly onBack: () => void;
 }
 
@@ -23,7 +25,7 @@ type Listing =
 
 const REFRESH_MS = 2000;
 
-export function ProjectScreen({ api, computerId, projectId, projectName, now, onNewTask, onOpenSession, onBack }: Props) {
+export function ProjectScreen({ api, computerId, projectId, projectName, now, onNewTask, onOpenSession, onOpenTerminal, onBack }: Props) {
   const [listing, setListing] = useState<Listing>({ kind: "loading" });
   const [tick, setTick] = useState(0);
   const current = useNow(30_000, now);
@@ -56,9 +58,20 @@ export function ProjectScreen({ api, computerId, projectId, projectName, now, on
       subtitle={projectId}
       onBack={onBack}
       footer={
-        <button type="button" className="button button-primary button-block" onClick={onNewTask}>
-          New task
-        </button>
+        onOpenTerminal === undefined ? (
+          <button type="button" className="button button-primary button-block" onClick={onNewTask}>
+            New task
+          </button>
+        ) : (
+          <div className="button-row">
+            <button type="button" className="button button-primary" onClick={onNewTask}>
+              New task
+            </button>
+            <button type="button" className="button button-secondary" onClick={onOpenTerminal}>
+              Terminal
+            </button>
+          </div>
+        )
       }
     >
       {listing.kind === "loading" && <SkeletonList rows={4} label="Loading tasks" />}

@@ -11,6 +11,7 @@ import { PairScreen } from "./ui/PairScreen";
 import { ProjectScreen } from "./ui/ProjectScreen";
 import { SettingsScreen, type ScenarioOption } from "./ui/SettingsScreen";
 import { SessionScreen } from "./ui/SessionScreen";
+import { TerminalScreen } from "./ui/TerminalScreen";
 
 type Route =
   | { readonly name: "computers" }
@@ -35,6 +36,7 @@ type Route =
       /** The turn that was just started, shown while the rest of the conversation loads. */
       readonly initialTurn: TaskSummary | null;
     }
+  | { readonly name: "terminal"; readonly computer: Computer; readonly projectId: string; readonly projectName: string }
   | { readonly name: "access_ended"; readonly computer: Computer; readonly message: string };
 
 interface Props {
@@ -274,6 +276,17 @@ function Screen({ route, ready, services, connection, listKey, scenarios, push, 
           now={now}
           onNewTask={() => push({ ...route, name: "new_task", initialPrompt: "" })}
           onOpenSession={(sessionId) => push({ ...route, name: "session", sessionId, initialTurn: null })}
+          onOpenTerminal={() => push({ ...route, name: "terminal" })}
+          onBack={back}
+        />
+      );
+    case "terminal":
+      return (
+        <TerminalScreen
+          api={api}
+          computerId={route.computer.id}
+          projectId={route.projectId}
+          projectName={route.projectName}
           onBack={back}
         />
       );
