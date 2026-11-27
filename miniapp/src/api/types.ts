@@ -173,6 +173,9 @@ export interface TaskResult {
   readonly finishedAt: number | null;
 }
 
+/** Upper bound on a task description, checked on both sides. */
+export const MAX_PROMPT_LENGTH = 4000;
+
 export interface StartTaskInput {
   readonly projectId: string;
   readonly agent: AgentId;
@@ -244,6 +247,8 @@ export type Unsubscribe = () => void;
  * session fail with `not_connected` instead of being queued.
  */
 export interface AgentikApi {
+  /** `mock` while the UI runs on demo data; the UI labels it as such. */
+  readonly backend: "mock" | "live";
   /** Paired computers on this phone, with their last known status. */
   listComputers(): Promise<ApiResult<Computer[]>>;
   /** Pins an untrusted invitation. Access exists only after the computer confirms. */

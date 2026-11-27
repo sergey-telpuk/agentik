@@ -14,27 +14,28 @@ import { pinnedDeviceFromInvitation } from "../../pairing/pin";
 import type { PinnedDevice, PinnedDeviceStore, StoreErrorCode } from "../../storage/pinnedDevices";
 import type { TelegramRuntime } from "../../telegram/runtime";
 import { canRequestCancel, isFinalState, transition, type TaskState } from "../taskState";
-import type {
-  Agent,
-  AgentikApi,
-  AgentId,
-  ApiError,
-  ApiErrorCode,
-  ApiResult,
-  ApprovalDecision,
-  ApprovalOutcome,
-  ApprovalRequest,
-  Computer,
-  ComputerStatus,
-  ConnectionState,
-  Diagnostics,
-  FileChange,
-  Project,
-  StartTaskInput,
-  TaskEvent,
-  TaskResult,
-  TaskSummary,
-  TaskUpdate,
+import {
+  MAX_PROMPT_LENGTH,
+  type Agent,
+  type AgentikApi,
+  type AgentId,
+  type ApiError,
+  type ApiErrorCode,
+  type ApiResult,
+  type ApprovalDecision,
+  type ApprovalOutcome,
+  type ApprovalRequest,
+  type Computer,
+  type ComputerStatus,
+  type ConnectionState,
+  type Diagnostics,
+  type FileChange,
+  type Project,
+  type StartTaskInput,
+  type TaskEvent,
+  type TaskResult,
+  type TaskSummary,
+  type TaskUpdate,
 } from "../types";
 import {
   DEMO_RELAY_URL,
@@ -59,7 +60,6 @@ export interface MockApiOptions {
 
 export const APPROVAL_TTL_MS = 10 * 60_000;
 export const CANCEL_CONFIRM_MS = 1500;
-export const MAX_PROMPT_LENGTH = 4000;
 
 type Timer = ReturnType<typeof setTimeout>;
 type Draft<E> = E extends TaskEvent ? Omit<E, "seq"> : never;
@@ -444,6 +444,8 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
   }
 
   return {
+    backend: "mock",
+
     async listComputers() {
       const fromStore = await pinnedRecords();
       if (!fromStore.ok) return fromStore;
@@ -491,7 +493,6 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
           });
           return;
         }
-        record.connectAttempts += 1;
         const ready = (): void => {
           const s: Session = { revoked: false };
           sessions.set(computerId, s);
@@ -504,7 +505,7 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
               record.status = "revoked";
               emit({
                 phase: "revoked",
-                message: `${record.name} ended access for this phone. The secure session was closed and new requests are rejected.`,
+                message: "The secure session was closed and new requests are rejected.",
               });
             });
           }
@@ -516,7 +517,7 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
             at(1400, () =>
               emit({
                 phase: "revoked",
-                message: `${record.name} ended access for this phone. Access is not restored automatically.`,
+                message: "The computer rejected this phone when it tried to connect.",
               }),
             );
             return;
@@ -553,21 +554,25 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
             at(4900, ready);
             return;
           case "online":
-            if (record.connectAttempts <= data.connect.failFirstAttempts) {
-              at(600, () => emit({ phase: "handshaking" }));
-              at(1600, () =>
-                emit({
-                  phase: "failed",
-                  reason: "handshake_failed",
-                  message: "The secure handshake did not complete in time. Nothing was sent to the computer.",
-                  retryable: true,
-                }),
-              );
-              return;
-            }
-            at(600, () => emit({ phase: "handshaking" }));
-            at(1300, () => emit({ phase: "synchronizing" }));
-            at(1900, ready);
+            at(600, () => {
+              // Counted only once an attempt reaches the handshake, so an
+              // attempt abandoned right away does not use up a failure.
+              record.connectAttempts += 1;
+              emit({ phase: "handshaking" });
+              if (record.connectAttempts <= data.connect.failFirstAttempts) {
+                at(1000, () =>
+                  emit({
+                    phase: "failed",
+                    reason: "handshake_failed",
+                    message: "The secure handshake did not complete in time. Nothing was sent to the computer.",
+                    retryable: true,
+                  }),
+                );
+                return;
+              }
+              at(700, () => emit({ phase: "synchronizing" }));
+              at(1300, ready);
+            });
             return;
         }
       });
