@@ -169,7 +169,14 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return err
 	}
 
-	cat, err := projects.NewCatalogue(configuredProjects)
+	// Projects live in the database, so they survive a restart and can be
+	// managed from the phone. --project still works: it adds to what is
+	// stored, which is how an existing setup keeps running unchanged.
+	storedProjects, err := loadProjects(ctx, db)
+	if err != nil {
+		return err
+	}
+	cat, err := projects.NewCatalogue(mergeProjects(storedProjects, configuredProjects))
 	if err != nil {
 		return err
 	}
@@ -614,8 +621,13 @@ func printInvitation(
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	// Without this the terminal goes quiet after the code, and it is not
+	// obvious that the next move is on the phone, nor that this window has to
+	// stay open to confirm it.
 	fmt.Fprintf(out, "\nPairing invitation (valid until %s):\n%s\nOr paste this text in the Mini App:\n%s\n\n",
 		inv.ExpiresAt.Local().Format("15:04"), inv.QR, inv.InvitationText)
+	fmt.Fprintf(out, "Waiting for a phone to scan it. Keep this window open: the phone appears\nhere and you confirm it with y. The code expires at %s; a new one is printed\nthen, or type pair for one now.\n\n",
+		inv.ExpiresAt.Local().Format("15:04"))
 	return inv, nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -306,10 +307,11 @@ func (s *Service) syncProjects(ctx context.Context) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	list := s.projects.List()
-	activeIDs := make(map[string]struct{}, len(list))
-	for _, p := range list {
-		activeIDs[p.ID] = struct{}{}
+	// The catalogue is the live set and this table is its record. Rows are
+	// not marked removed from here: the catalogue is loaded from this table
+	// at start, so anything missing from it was removed on purpose and is
+	// deleted explicitly.
+	for _, p := range s.projects.List() {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO projects (id, name, path, allowed_agent, created_at, removed_at)
 			 VALUES (?, ?, ?, ?, ?, NULL)
@@ -324,28 +326,6 @@ func (s *Service) syncProjects(ctx context.Context) error {
 		}
 	}
 
-	// Mark projects no longer in the local catalogue as removed without breaking historical FK rows.
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM projects WHERE removed_at IS NULL`)
-	if err != nil {
-		return fmt.Errorf("runtime: list stored projects: %w", err)
-	}
-	var toRemove []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		if _, ok := activeIDs[id]; !ok {
-			toRemove = append(toRemove, id)
-		}
-	}
-	rows.Close()
-	for _, id := range toRemove {
-		if _, err := tx.ExecContext(ctx, `UPDATE projects SET removed_at = ? WHERE id = ?`, nowUnix, id); err != nil {
-			return fmt.Errorf("runtime: mark removed project %q: %w", id, err)
-		}
-	}
 	return tx.Commit()
 }
 
@@ -401,6 +381,10 @@ func (s *Service) HandleMessage(ctx context.Context, sess *secure.ManagedSession
 	switch req.Method {
 	case "project.list":
 		s.handleProjectList(ctx, sess, req)
+	case "project.add":
+		s.handleProjectAdd(ctx, sess, req)
+	case "project.remove":
+		s.handleProjectRemove(ctx, sess, req)
 	case "agent.list":
 		s.handleAgentList(ctx, sess, req)
 	case "session.list":
@@ -576,6 +560,113 @@ func (s *Service) handleProjectList(ctx context.Context, sess *secure.ManagedSes
 		})
 	}
 	s.sendResult(ctx, sess, req.RequestID, map[string]any{"projects": out})
+}
+
+// handleProjectAdd permits a directory on this computer.
+//
+// The path arrives from the phone, which is a deliberate change from the
+// original design: a phone with access can now point an agent at any
+// directory the user running the daemon can reach. Pairing and the Noise
+// handshake still gate who may ask.
+func (s *Service) handleProjectAdd(ctx context.Context, sess *secure.ManagedSession, req InboundRequest) {
+	var params struct {
+		Path  string `json:"path"`
+		Name  string `json:"name"`
+		Agent string `json:"agent"`
+	}
+	if err := decodeStrictParams(req.Params, &params); err != nil {
+		s.sendError(ctx, sess, req.RequestID, "bad_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(params.Path) == "" {
+		s.sendError(ctx, sess, req.RequestID, "bad_request", "path must not be empty")
+		return
+	}
+	agent := params.Agent
+	if agent == "" {
+		agent = codex.AgentName
+	}
+	if _, ok := s.agents[agent]; !ok {
+		s.sendError(ctx, sess, req.RequestID, "agent_unavailable", "no adapter for agent "+agent)
+		return
+	}
+
+	added, err := s.projects.Add(projects.Project{
+		ID:           projectIDFor(params.Path),
+		Name:         strings.TrimSpace(params.Name),
+		Root:         params.Path,
+		AllowedAgent: agent,
+	})
+	if err != nil {
+		// A missing directory or a duplicate root is the caller's mistake,
+		// not a server fault.
+		s.sendError(ctx, sess, req.RequestID, "bad_request", err.Error())
+		return
+	}
+	if err := s.syncProjects(ctx); err != nil {
+		s.projects.Remove(added.ID)
+		s.sendError(ctx, sess, req.RequestID, "internal", "failed to store the project")
+		return
+	}
+	s.sendResult(ctx, sess, req.RequestID, ProjectInfo{
+		ProjectID: added.ID,
+		Name:      added.Name,
+		Agents:    []string{added.AllowedAgent},
+	})
+}
+
+// handleProjectRemove withdraws permission for a directory. Conversations
+// that ran in it are kept: the history is about work that happened, and
+// session.delete is how a conversation is removed.
+func (s *Service) handleProjectRemove(ctx context.Context, sess *secure.ManagedSession, req InboundRequest) {
+	var params struct {
+		ProjectID string `json:"project_id"`
+	}
+	if err := decodeStrictParams(req.Params, &params); err != nil {
+		s.sendError(ctx, sess, req.RequestID, "bad_request", err.Error())
+		return
+	}
+	proj, err := s.projects.Get(params.ProjectID)
+	if err != nil {
+		s.sendError(ctx, sess, req.RequestID, "not_found", err.Error())
+		return
+	}
+
+	// Removing a project while an agent is working in it would leave the turn
+	// running with no project to report against.
+	var active int
+	if err := s.db.SQL().QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM tasks t
+		 JOIN agent_sessions a ON t.session_id = a.id
+		 WHERE a.project_id = ?
+		   AND t.state IN ('accepted','starting','running','awaiting_approval','cancel_requested')`,
+		proj.ID,
+	).Scan(&active); err != nil {
+		s.sendError(ctx, sess, req.RequestID, "internal", "failed to check the project")
+		return
+	}
+	if active > 0 {
+		s.sendError(ctx, sess, req.RequestID, "project_busy", "an agent is still working in this project")
+		return
+	}
+
+	s.projects.Remove(proj.ID)
+	if _, err := s.db.SQL().ExecContext(ctx,
+		`UPDATE projects SET removed_at = ? WHERE id = ?`, s.now().Unix(), proj.ID); err != nil {
+		// Put it back: the catalogue and the table must agree.
+		_, _ = s.projects.Add(proj)
+		s.sendError(ctx, sess, req.RequestID, "internal", "failed to remove the project")
+		return
+	}
+	s.sendResult(ctx, sess, req.RequestID, map[string]any{"project_id": proj.ID, "removed": true})
+}
+
+// projectIDFor derives a stable id from a path. The id is what clients refer
+// to, and it carries no part of the path: the layout of the machine is not
+// something a client needs to learn.
+func projectIDFor(path string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(path)))
+	return "proj_" + hex.EncodeToString(sum[:8])
 }
 
 func (s *Service) handleAgentList(ctx context.Context, sess *secure.ManagedSession, req InboundRequest) {

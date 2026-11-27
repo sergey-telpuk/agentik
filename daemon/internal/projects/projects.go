@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 var (
@@ -46,6 +47,7 @@ type Project struct {
 //
 // It is populated from local configuration, never from the network.
 type Catalogue struct {
+	mu   sync.RWMutex
 	byID map[string]Project
 }
 
@@ -109,6 +111,8 @@ func resolveRoot(path string) (string, error) {
 
 // Get returns the project with the given id.
 func (c *Catalogue) Get(id string) (Project, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	p, ok := c.byID[id]
 	if !ok {
 		// The error deliberately does not say whether some other project
@@ -123,6 +127,8 @@ func (c *Catalogue) Get(id string) (Project, error) {
 // The order is by id so that the Mini App sees a consistent list across
 // calls rather than Go's randomised map iteration.
 func (c *Catalogue) List() []Project {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	out := make([]Project, 0, len(c.byID))
 	for _, p := range c.byID {
 		out = append(out, p)
@@ -136,7 +142,55 @@ func (c *Catalogue) List() []Project {
 }
 
 // Len reports how many projects are permitted.
-func (c *Catalogue) Len() int { return len(c.byID) }
+func (c *Catalogue) Len() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.byID)
+}
+
+// Add validates a project and puts it in the catalogue, replacing any project
+// with the same id. It returns the stored form, with the root resolved.
+//
+// Validation is the same as at load time, so a directory that does not exist,
+// or a path that is not a directory, is refused here rather than when a task
+// tries to run in it.
+func (c *Catalogue) Add(p Project) (Project, error) {
+	if p.ID == "" {
+		return Project{}, fmt.Errorf("%w: empty project id", ErrInvalid)
+	}
+	if p.AllowedAgent == "" {
+		return Project{}, fmt.Errorf("%w: project %q has no allowed agent", ErrInvalid, p.ID)
+	}
+	root, err := resolveRoot(p.Root)
+	if err != nil {
+		return Project{}, fmt.Errorf("%w: project %q: %v", ErrInvalid, p.ID, err)
+	}
+	p.Root = root
+	if p.Name == "" {
+		p.Name = filepath.Base(root)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Two ids for one directory would let the same work look like two
+	// projects, and the concurrency rule is per directory.
+	for id, existing := range c.byID {
+		if id != p.ID && existing.Root == root {
+			return Project{}, fmt.Errorf("%w: %q is already the project %q", ErrInvalid, root, id)
+		}
+	}
+	c.byID[p.ID] = p
+	return p, nil
+}
+
+// Remove drops a project. It reports whether one was there.
+func (c *Catalogue) Remove(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.byID[id]
+	delete(c.byID, id)
+	return ok
+}
 
 // AllowsAgent reports whether the named agent may run in this project.
 func (p Project) AllowsAgent(agent string) bool {
