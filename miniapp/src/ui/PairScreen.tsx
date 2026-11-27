@@ -1,11 +1,7 @@
 import { useState } from "react";
 import type { AgentikApi } from "../api/types";
 import { encodeBase64Url } from "../encoding";
-import {
-  checkInvitationBindings,
-  parseInvitation,
-  type UntrustedInvitation,
-} from "../pairing/invitation";
+import { parseInvitation, type UntrustedInvitation } from "../pairing/invitation";
 import type { AppServices } from "../services";
 import type { PersistenceState } from "../storage/pinnedDevices";
 import { sentence } from "./format";
@@ -31,14 +27,9 @@ export function PairScreen({ services, api, persistence, onPinned, onCancel }: P
 
   async function check(source: string): Promise<void> {
     setInvitation(null);
-    const parsed = parseInvitation(source, services.now());
+    const parsed = await parseInvitation(source, services.now());
     if (!parsed.ok) {
       setError(parsed.error.message);
-      return;
-    }
-    const mismatch = await checkInvitationBindings(parsed.value);
-    if (mismatch !== null) {
-      setError(mismatch.message);
       return;
     }
     setError(null);
@@ -89,7 +80,7 @@ export function PairScreen({ services, api, persistence, onPinned, onCancel }: P
           spellCheck={false}
           autoComplete="off"
           autoCapitalize="off"
-          placeholder="agentik-pair-v1:…"
+          placeholder="AGENTIK1:…"
           aria-describedby="invitation-hint"
           aria-invalid={error !== null}
         />

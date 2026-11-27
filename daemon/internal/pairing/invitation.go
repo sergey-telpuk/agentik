@@ -6,44 +6,49 @@ package pairing
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base32"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/sergey-telpuk/agentik/daemon/internal/protocol"
-	"rsc.io/qr"
 )
 
-// InvitationPrefix identifies an Agentik v1 pairing payload when encoded as a
-// compact QR/text string. Must match INVITATION_PREFIX in miniapp.
-const InvitationPrefix = "agentik-pair-v1:"
+// InvitationPrefix starts every pairing invitation text. It is uppercase so the
+// whole text stays inside the QR alphanumeric character set, the densest text
+// mode a QR code has. Must match INVITATION_PREFIX in miniapp.
+const InvitationPrefix = "AGENTIK1:"
 
-// MaxInvitationTextLength bounds untrusted pasted/scanned pairing text.
-const MaxInvitationTextLength = 4096
+// DefaultRelayURL is the hosted relay. An invitation for this relay carries a
+// one-byte selector instead of the URL. Must match DEFAULT_RELAY_URL in miniapp.
+const DefaultRelayURL = "wss://agentik-relay.agentikcl.workers.dev"
+
+// MaxInvitationTextLength bounds untrusted pasted/scanned pairing text. A
+// real invitation is roughly 280 characters.
+const MaxInvitationTextLength = 1024
 
 // InvitationSecretSize is the size in bytes of the one-time high-entropy secret.
 const InvitationSecretSize = 32
 
-// InvitationWire is the canonical JSON wire representation of a pairing
-// invitation shared between the Go daemon and the TypeScript Mini App.
-//
-// All binary fields use unpadded base64url except device_id, which uses
-// lowercase unpadded base32 (matching protocol.FormatDeviceID).
-type InvitationWire struct {
-	V                 uint16 `json:"v"`
-	Relay             string `json:"relay"`
-	DeviceID          string `json:"device_id"`
-	RegisterPublicKey string `json:"register_public_key"`
-	NoisePublicKey    string `json:"noise_public_key"`
-	InvitationID      string `json:"invitation_id"`
-	InvitationSecret  string `json:"invitation_secret"`
-	ExpiresAt         int64  `json:"expires_at"`
-	Signature         string `json:"signature"`
-}
+// Relay selector values in byte 1 of the binary invitation.
+const (
+	relayDefault byte = 0 // DefaultRelayURL, nothing follows
+	relayWSS     byte = 1 // "wss://" + the remaining bytes
+	relayWS      byte = 2 // "ws://" + the remaining bytes (loopback only)
+)
+
+// invitationFixedSize is the size of the binary invitation without a custom
+// relay: version, relay selector, register key, Noise key, secret, expiry,
+// signature.
+const invitationFixedSize = 1 + 1 + ed25519.PublicKeySize + protocol.NoiseKeySize +
+	InvitationSecretSize + 4 + ed25519.SignatureSize
+
+var invitationBase32 = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // ParsedInvitation is a structurally validated and descriptor-verified
 // invitation decoded from QR or text.
@@ -73,7 +78,19 @@ func NormalizeRelayURL(raw string) (string, error) {
 }
 
 // EncodeInvitation serializes a signed PairingDescriptor together with the
-// one-time invitation secret using the agentik-pair-v1:<base64url(json)> format.
+// one-time invitation secret into the compact invitation text
+// `AGENTIK1:<base32>` (AGENTIK.md section 5.3).
+//
+// The binary payload, all integers big-endian:
+//
+//	1   version (1)
+//	1   relay selector: 0 default relay, 1 wss:// custom, 2 ws:// custom
+//	32  register public key (Ed25519; device_id is its SHA-256, not carried)
+//	32  Noise public key (X25519)
+//	32  invitation secret (the invitation id is its SHA-256, not carried)
+//	4   expiry, Unix seconds
+//	64  Ed25519 signature of the PairingDescriptor
+//	..  custom relay: host[:port][/path] without scheme, to the end
 func EncodeInvitation(desc *protocol.PairingDescriptor, secret []byte) (string, error) {
 	if desc == nil {
 		return "", errors.New("pairing: descriptor is nil")
@@ -85,108 +102,132 @@ func EncodeInvitation(desc *protocol.PairingDescriptor, secret []byte) (string, 
 	if !protocol.ConstantTimeEqual(sum[:], desc.InvitationHash) {
 		return "", errors.New("pairing: invitation secret does not match descriptor hash")
 	}
+	if desc.Version == 0 || desc.Version > 0xff {
+		return "", fmt.Errorf("pairing: version %d does not fit the invitation", desc.Version)
+	}
+	if len(desc.RegisterPublicKey) != ed25519.PublicKeySize ||
+		len(desc.NoisePublicKey) != protocol.NoiseKeySize ||
+		len(desc.Signature) != ed25519.SignatureSize {
+		return "", errors.New("pairing: descriptor has wrongly sized keys or signature")
+	}
+	if !protocol.ConstantTimeEqual(desc.DeviceID, protocol.DeviceIDFromKey(desc.RegisterPublicKey)) {
+		return "", errors.New("pairing: device id does not match registration key")
+	}
+	exp := desc.ExpiresAt.Unix()
+	if exp <= 0 || exp > math.MaxUint32 {
+		return "", fmt.Errorf("pairing: expiry %d does not fit 32 bits", exp)
+	}
 	relayURL, err := NormalizeRelayURL(desc.RelayURL)
 	if err != nil {
 		return "", err
 	}
-	wire := InvitationWire{
-		V:                 desc.Version,
-		Relay:             relayURL,
-		DeviceID:          protocol.FormatDeviceID(desc.DeviceID),
-		RegisterPublicKey: base64.RawURLEncoding.EncodeToString(desc.RegisterPublicKey),
-		NoisePublicKey:    base64.RawURLEncoding.EncodeToString(desc.NoisePublicKey),
-		InvitationID:      base64.RawURLEncoding.EncodeToString(desc.InvitationHash),
-		InvitationSecret:  base64.RawURLEncoding.EncodeToString(secret),
-		ExpiresAt:         desc.ExpiresAt.Unix(),
-		Signature:         base64.RawURLEncoding.EncodeToString(desc.Signature),
+	if relayURL != desc.RelayURL {
+		// The signature covers desc.RelayURL; the phone rebuilds the normalised form.
+		return "", fmt.Errorf("pairing: relay URL %q is not normalised", desc.RelayURL)
 	}
-	rawJSON, err := json.Marshal(wire)
-	if err != nil {
-		return "", fmt.Errorf("pairing: encode invitation JSON: %w", err)
+
+	selector, relayRest := relayDefault, ""
+	if relayURL != DefaultRelayURL {
+		switch {
+		case strings.HasPrefix(relayURL, "wss://"):
+			selector, relayRest = relayWSS, strings.TrimPrefix(relayURL, "wss://")
+		default:
+			selector, relayRest = relayWS, strings.TrimPrefix(relayURL, "ws://")
+		}
 	}
-	return InvitationPrefix + base64.RawURLEncoding.EncodeToString(rawJSON), nil
+
+	buf := make([]byte, 0, invitationFixedSize+len(relayRest))
+	buf = append(buf, byte(desc.Version), selector)
+	buf = append(buf, desc.RegisterPublicKey...)
+	buf = append(buf, desc.NoisePublicKey...)
+	buf = append(buf, secret...)
+	buf = binary.BigEndian.AppendUint32(buf, uint32(exp))
+	buf = append(buf, desc.Signature...)
+	buf = append(buf, relayRest...)
+	return InvitationPrefix + invitationBase32.EncodeToString(buf), nil
 }
 
-// ParseInvitation decodes either `agentik-pair-v1:<base64url>` or raw JSON,
-// verifies the secret binding, expiry, and Ed25519 PairingDescriptor signature.
+// ParseInvitation decodes an invitation text, verifies the secret binding,
+// expiry, and Ed25519 PairingDescriptor signature. Whitespace anywhere in the
+// text (line wraps from a terminal) and letter case are ignored.
 func ParseInvitation(text string, now time.Time) (*ParsedInvitation, error) {
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
+	compact := strings.ToUpper(strings.Join(strings.Fields(text), ""))
+	if compact == "" {
 		return nil, fmt.Errorf("%w: empty invitation", protocol.ErrMalformed)
 	}
-	if len(trimmed) > MaxInvitationTextLength {
+	if len(compact) > MaxInvitationTextLength {
 		return nil, fmt.Errorf("%w: invitation exceeds %d chars", protocol.ErrMalformed, MaxInvitationTextLength)
 	}
+	if !strings.HasPrefix(compact, InvitationPrefix) {
+		return nil, fmt.Errorf("%w: missing %s prefix", protocol.ErrMalformed, InvitationPrefix)
+	}
+	encoded := strings.TrimPrefix(compact, InvitationPrefix)
+	raw, err := invitationBase32.DecodeString(encoded)
+	if err != nil || invitationBase32.EncodeToString(raw) != encoded {
+		return nil, fmt.Errorf("%w: invalid base32 payload", protocol.ErrMalformed)
+	}
+	if len(raw) < invitationFixedSize {
+		return nil, fmt.Errorf("%w: invitation is %d bytes, want at least %d", protocol.ErrMalformed, len(raw), invitationFixedSize)
+	}
 
-	rawJSON := []byte(trimmed)
-	if strings.HasPrefix(trimmed, InvitationPrefix) {
-		decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(trimmed, InvitationPrefix))
-		if err != nil {
-			return nil, fmt.Errorf("%w: invalid base64url payload", protocol.ErrMalformed)
+	version := raw[0]
+	if uint16(version) != protocol.Version {
+		return nil, fmt.Errorf("%w: unsupported invitation version %d", protocol.ErrMalformed, version)
+	}
+	selector := raw[1]
+	off := 2
+	next := func(n int) []byte {
+		field := raw[off : off+n]
+		off += n
+		return field
+	}
+	regPub := next(ed25519.PublicKeySize)
+	noisePub := next(protocol.NoiseKeySize)
+	secret := next(InvitationSecretSize)
+	expiresAt := int64(binary.BigEndian.Uint32(next(4)))
+	sig := next(ed25519.SignatureSize)
+	rest := string(raw[off:])
+
+	var relayURL string
+	switch selector {
+	case relayDefault:
+		if rest != "" {
+			return nil, fmt.Errorf("%w: default relay carries trailing bytes", protocol.ErrMalformed)
 		}
-		rawJSON = decoded
+		relayURL = DefaultRelayURL
+	case relayWSS:
+		relayURL = "wss://" + rest
+	case relayWS:
+		relayURL = "ws://" + rest
+	default:
+		return nil, fmt.Errorf("%w: unknown relay selector %d", protocol.ErrMalformed, selector)
+	}
+	normalized, err := NormalizeRelayURL(relayURL)
+	if err != nil || normalized != relayURL || (selector != relayDefault && relayURL == DefaultRelayURL) {
+		return nil, fmt.Errorf("%w: invalid relay", protocol.ErrMalformed)
+	}
+	if expiresAt <= 0 {
+		return nil, fmt.Errorf("%w: expiry must be positive", protocol.ErrMalformed)
 	}
 
-	var wire InvitationWire
-	if err := json.Unmarshal(rawJSON, &wire); err != nil {
-		return nil, fmt.Errorf("%w: invalid invitation JSON: %v", protocol.ErrMalformed, err)
-	}
-	if wire.V != protocol.Version {
-		return nil, fmt.Errorf("%w: unsupported invitation version %d", protocol.ErrMalformed, wire.V)
-	}
-	relayURL, err := NormalizeRelayURL(wire.Relay)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", protocol.ErrMalformed, err)
-	}
-	deviceID, err := protocol.ParseDeviceID(wire.DeviceID)
-	if err != nil {
-		return nil, err
-	}
-	regPub, err := decodeExactBase64URL(wire.RegisterPublicKey, ed25519.PublicKeySize)
-	if err != nil {
-		return nil, fmt.Errorf("%w: register_public_key: %v", protocol.ErrMalformed, err)
-	}
-	noisePub, err := decodeExactBase64URL(wire.NoisePublicKey, protocol.NoiseKeySize)
-	if err != nil {
-		return nil, fmt.Errorf("%w: noise_public_key: %v", protocol.ErrMalformed, err)
-	}
-	invID, err := decodeExactBase64URL(wire.InvitationID, 32)
-	if err != nil {
-		return nil, fmt.Errorf("%w: invitation_id: %v", protocol.ErrMalformed, err)
-	}
-	secret, err := decodeExactBase64URL(wire.InvitationSecret, InvitationSecretSize)
-	if err != nil {
-		return nil, fmt.Errorf("%w: invitation_secret: %v", protocol.ErrMalformed, err)
-	}
-	sig, err := decodeExactBase64URL(wire.Signature, ed25519.SignatureSize)
-	if err != nil {
-		return nil, fmt.Errorf("%w: signature: %v", protocol.ErrMalformed, err)
-	}
-	if wire.ExpiresAt <= 0 {
-		return nil, fmt.Errorf("%w: expires_at must be positive", protocol.ErrMalformed)
-	}
-
+	deviceID := protocol.DeviceIDFromKey(regPub)
 	sum := sha256.Sum256(secret)
-	if !protocol.ConstantTimeEqual(sum[:], invID) {
-		return nil, fmt.Errorf("%w: invitation_id does not match invitation_secret", protocol.ErrMalformed)
-	}
-
 	desc := &protocol.PairingDescriptor{
-		Version:           wire.V,
+		Version:           uint16(version),
 		RelayURL:          relayURL,
 		DeviceID:          deviceID,
-		RegisterPublicKey: ed25519.PublicKey(regPub),
-		NoisePublicKey:    noisePub,
-		InvitationHash:    invID,
-		ExpiresAt:         time.Unix(wire.ExpiresAt, 0),
-		Signature:         sig,
+		RegisterPublicKey: ed25519.PublicKey(append([]byte(nil), regPub...)),
+		NoisePublicKey:    append([]byte(nil), noisePub...),
+		InvitationHash:    sum[:],
+		ExpiresAt:         time.Unix(expiresAt, 0),
+		Signature:         append([]byte(nil), sig...),
 	}
 	if err := desc.Verify(now); err != nil {
 		return nil, err
 	}
 	return &ParsedInvitation{
 		Descriptor:       desc,
-		InvitationSecret: secret,
+		InvitationSecret: append([]byte(nil), secret...),
 		DeviceIDText:     protocol.FormatDeviceID(deviceID),
 	}, nil
 }
@@ -203,45 +244,6 @@ func decodeExactBase64URL(s string, want int) ([]byte, error) {
 		return nil, fmt.Errorf("got %d bytes, want %d", len(b), want)
 	}
 	return b, nil
-}
-
-// RenderQR encodes payload as a compact UTF-8 half-block QR code suitable for
-// display in a terminal.
-func RenderQR(payload string) (string, error) {
-	code, err := qr.Encode(payload, qr.L)
-	if err != nil {
-		return "", fmt.Errorf("pairing: encode QR code: %w", err)
-	}
-	const quiet = 2
-	total := code.Size + 2*quiet
-	black := func(x, y int) bool {
-		qx := x - quiet
-		qy := y - quiet
-		if qx < 0 || qy < 0 || qx >= code.Size || qy >= code.Size {
-			return false
-		}
-		return code.Black(qx, qy)
-	}
-
-	var b strings.Builder
-	for y := 0; y < total; y += 2 {
-		for x := range total {
-			top := black(x, y)
-			bottom := y+1 < total && black(x, y+1)
-			switch {
-			case top && bottom:
-				b.WriteRune(' ')
-			case top && !bottom:
-				b.WriteRune('▄')
-			case !top && bottom:
-				b.WriteRune('▀')
-			default:
-				b.WriteRune('█')
-			}
-		}
-		b.WriteByte('\n')
-	}
-	return b.String(), nil
 }
 
 // Fingerprint renders a human-readable short verification display of a 32-byte

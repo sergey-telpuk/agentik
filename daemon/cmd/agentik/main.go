@@ -20,6 +20,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sergey-telpuk/agentik/daemon/internal/agents"
 	"github.com/sergey-telpuk/agentik/daemon/internal/agents/codex"
@@ -38,7 +39,7 @@ import (
 var version = "dev"
 
 const (
-	defaultRelayURL = "wss://agentik-relay.agentikcl.workers.dev"
+	defaultRelayURL = pairing.DefaultRelayURL
 	defaultRelayID  = "agentik-relay"
 	defaultPairTTL  = 10 * time.Minute
 )
@@ -126,7 +127,8 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	relayURL := fs.String("relay", envOr(envRelayURL, defaultRelayURL),
 		"signaling relay WSS base URL; the relay carries WebRTC signaling only, never application data (env "+envRelayURL+")")
 	relayID := fs.String("relay-id", defaultRelayID, "expected relay identifier")
-	pairOnStart := fs.Bool("pair", false, "print a one-time pairing invitation and QR code on startup")
+	pairOnStart := fs.Bool("pair", false, "always print a pairing invitation and QR code on startup "+
+		"(by default one is printed only while no phone is paired)")
 	pairTTL := fs.Duration("pair-ttl", defaultPairTTL, "lifetime of newly issued pairing invitations")
 	telegramBotID := fs.Int64("telegram-bot-id", 0, "expected Telegram bot id for initData verification (0 disables)")
 	codexBin := fs.String("codex-bin", "codex", "path or command name for codex CLI")
@@ -186,18 +188,24 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		Discoverer: discovery.New(discCfg),
 	})
 
+	// Diagnostics are the answer with -status; otherwise they are logs, and
+	// stdout stays reserved for what the user has to read or act on.
+	diag := errOut
+	if *showStatus {
+		diag = out
+	}
 	if created {
-		fmt.Fprintln(out, "Created a new device identity.")
+		fmt.Fprintln(diag, "Created a new device identity.")
 	}
-	fmt.Fprintf(out, "device id:     %s\n", id.DeviceIDString())
-	fmt.Fprintf(out, "data dir:      %s\n", store.Dir())
-	fmt.Fprintf(out, "database:      %s (schema v%d)\n", db.Path(), schemaVersion)
-	fmt.Fprintf(out, "projects:      %d\n", cat.Len())
-	fmt.Fprintf(out, "codex:         available=%v authenticated=%v", codexDiag.Available, codexDiag.Authenticated)
+	fmt.Fprintf(diag, "device id:     %s\n", id.DeviceIDString())
+	fmt.Fprintf(diag, "data dir:      %s\n", store.Dir())
+	fmt.Fprintf(diag, "database:      %s (schema v%d)\n", db.Path(), schemaVersion)
+	fmt.Fprintf(diag, "projects:      %d\n", cat.Len())
+	fmt.Fprintf(diag, "codex:         available=%v authenticated=%v", codexDiag.Available, codexDiag.Authenticated)
 	if codexDiag.Version != "" {
-		fmt.Fprintf(out, " version=%q", codexDiag.Version)
+		fmt.Fprintf(diag, " version=%q", codexDiag.Version)
 	}
-	fmt.Fprintln(out)
+	fmt.Fprintln(diag)
 
 	if *showStatus {
 		fmt.Fprintln(out, "agents:")
@@ -230,11 +238,17 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return err
 	}
 
+	// One mutex for both streams keeps lines whole when they share a terminal.
 	var outMu sync.Mutex
 	logLine := func(format string, a ...any) {
 		outMu.Lock()
 		defer outMu.Unlock()
 		fmt.Fprintf(out, format+"\n", a...)
+	}
+	logf := func(format string, a ...any) {
+		outMu.Lock()
+		defer outMu.Unlock()
+		fmt.Fprintf(errOut, format+"\n", a...)
 	}
 
 	pendingNotify := make(chan struct{}, 4)
@@ -284,7 +298,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		acceptor,
 		acceptor.Prologue,
 		func(connID string, secErr error) {
-			logLine("secure[%s]: %v", connID, secErr)
+			logf("secure[%s]: %v", connID, secErr)
 		},
 	)
 	if err != nil {
@@ -304,9 +318,9 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		Handlers: transport.Handlers{
 			OnStatus: func(st transport.Status) {
 				if st.LastError != "" {
-					logLine("relay: %s (attempt=%d error=%s)", st.State, st.Attempt, st.LastError)
+					logf("relay: %s (attempt=%d error=%s)", st.State, st.Attempt, st.LastError)
 				} else {
-					logLine("relay: %s (attempt=%d)", st.State, st.Attempt)
+					logf("relay: %s (attempt=%d)", st.State, st.Attempt)
 				}
 			},
 			OnRegistered: func(_ string, connections []string) {
@@ -322,9 +336,9 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 			},
 			OnRelayError: func(code, message, connectionID string) {
 				if connectionID != "" {
-					logLine("relay error[%s]: %s (%s)", connectionID, code, message)
+					logf("relay error[%s]: %s (%s)", connectionID, code, message)
 				} else {
-					logLine("relay error: %s (%s)", code, message)
+					logf("relay error: %s (%s)", code, message)
 				}
 			},
 		},
@@ -333,6 +347,24 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return err
 	}
 	signaler.set(tClient.SendSignal)
+
+	paired, err := pairSvc.PairedClientCount(runCtx)
+	if err != nil {
+		return err
+	}
+	outMu.Lock()
+	printStartup(out, paired)
+	outMu.Unlock()
+	if paired == 0 || *pairOnStart {
+		inv, err := printInvitation(runCtx, pairSvc, normalizedRelay, *pairTTL, &outMu, out)
+		if err != nil {
+			return err
+		}
+		if paired == 0 {
+			go refreshInvitation(runCtx, pairSvc, normalizedRelay, *pairTTL, inv.ExpiresAt, &outMu, out)
+		}
+	}
+	logf("Commands: pair, clients, revoke <id>, quit")
 
 	var transportWg sync.WaitGroup
 	transportErrCh := make(chan error, 1)
@@ -345,14 +377,6 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		cancelRun()
 		transportWg.Wait()
 	}()
-
-	if *pairOnStart {
-		if err := printNewInvitation(runCtx, pairSvc, normalizedRelay, *pairTTL, &outMu, out); err != nil {
-			return err
-		}
-	}
-
-	logLine("Daemon running. Commands: pair, clients, revoke <id>, quit")
 
 	lineCh := make(chan string)
 	go func() {
@@ -435,7 +459,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 				logLine("Shutting down.")
 				return nil
 			case cmd == "pair":
-				if err := printNewInvitation(runCtx, pairSvc, normalizedRelay, *pairTTL, &outMu, out); err != nil {
+				if _, err := printInvitation(runCtx, pairSvc, normalizedRelay, *pairTTL, &outMu, out); err != nil {
 					logLine("pair error: %v", err)
 				}
 			case cmd == "clients":
@@ -490,20 +514,110 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	}
 }
 
-func printNewInvitation(
+// welcomeParagraphs introduce Agentik on a start with no paired phone. The
+// last one must match the confirmation prompt, which accepts y.
+var welcomeParagraphs = []string{
+	"Agentik runs your AI coding agents on this computer and lets you control them from your phone.",
+	"This program (the daemon) runs on this Mac, starts agents such as Codex in your project folders, " +
+		"and keeps the connection to your phone encrypted. It makes no incoming connections.",
+	"Scan the code below with the Agentik app in Telegram to pair this computer. " +
+		"You confirm the pairing here with y.",
+}
+
+// terminalWidth is the narrowest terminal the startup output is laid out for.
+const terminalWidth = 80
+
+// printStartup prints the welcome banner while no phone is paired, and a
+// single status line once one is.
+func printStartup(out io.Writer, paired int) {
+	if paired > 0 {
+		fmt.Fprintf(out, "Agentik daemon is running. Paired phones: %d. Stop with Ctrl+C.\n", paired)
+		return
+	}
+	for i, p := range welcomeParagraphs {
+		if i > 0 {
+			fmt.Fprintln(out)
+		}
+		fmt.Fprint(out, wrapWords(p, terminalWidth))
+	}
+}
+
+// wrapWords breaks text at spaces into lines of at most width columns, each
+// ending in a newline. A single word longer than width gets a line of its own.
+func wrapWords(text string, width int) string {
+	var b strings.Builder
+	line := 0
+	for _, word := range strings.Fields(text) {
+		n := utf8.RuneCountInString(word)
+		switch {
+		case line == 0:
+		case line+1+n > width:
+			b.WriteByte('\n')
+			line = 0
+		default:
+			b.WriteByte(' ')
+			line++
+		}
+		b.WriteString(word)
+		line += n
+	}
+	b.WriteByte('\n')
+	return b.String()
+}
+
+// printInvitation issues an invitation and prints its QR code with the
+// invitation text underneath, for the case where the camera cannot read it.
+func printInvitation(
 	ctx context.Context,
 	pairSvc *pairing.Service,
 	relayURL string,
 	ttl time.Duration,
 	mu *sync.Mutex,
 	out io.Writer,
-) error {
+) (*pairing.IssuedInvitation, error) {
 	inv, err := pairSvc.CreateInvitation(ctx, relayURL, ttl)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	fmt.Fprintf(out, "\nPairing invitation (expires %s):\n%s\n\n%s\n", inv.ExpiresAt.Format(time.RFC3339), inv.QR, inv.InvitationText)
-	return nil
+	fmt.Fprintf(out, "\nPairing invitation (valid until %s):\n%s\nOr paste this text in the Mini App:\n%s\n\n",
+		inv.ExpiresAt.Local().Format("15:04"), inv.QR, inv.InvitationText)
+	return inv, nil
+}
+
+// refreshInvitation prints a new invitation each time the previous one has
+// expired, for as long as no phone is paired. It stops when a phone pairs or
+// the context ends, and waits while a pairing confirmation is pending so a
+// new QR code does not scroll the confirmation prompt away.
+func refreshInvitation(
+	ctx context.Context,
+	pairSvc *pairing.Service,
+	relayURL string,
+	ttl time.Duration,
+	expiresAt time.Time,
+	mu *sync.Mutex,
+	out io.Writer,
+) {
+	const pendingRecheck = 5 * time.Second
+	wait := time.Until(expiresAt)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		if paired, err := pairSvc.PairedClientCount(ctx); err != nil || paired > 0 {
+			return
+		}
+		if len(pairSvc.ListPending()) > 0 {
+			wait = pendingRecheck
+			continue
+		}
+		inv, err := printInvitation(ctx, pairSvc, relayURL, ttl, mu, out)
+		if err != nil {
+			return
+		}
+		wait = time.Until(inv.ExpiresAt)
+	}
 }

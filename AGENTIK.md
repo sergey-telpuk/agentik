@@ -181,7 +181,26 @@ An unauthorized connection does not evict a running daemon. Re-registration with
 
 ### 5.3. Initial phone pairing
 
-The QR code contains the version, the relay address, the computer identifier, both public keys, and a one-time high-entropy invitation. The invitation travels over the secure channel, has a TTL, and is consumed after a successful confirmation. It is not placed in persistent URLs or logs. A short numeric code may serve as a verification display, but not as the sole access secret.
+The QR code contains the version, the relay address, the registration public key (the computer identifier is its SHA-256), the Noise public key, a one-time high-entropy invitation secret, the expiry, and the computer's signature. The invitation travels over the secure channel, has a TTL, and is consumed after a successful confirmation. It is not placed in persistent URLs or logs. A short numeric code may serve as a verification display, but not as the sole access secret.
+
+The invitation text is `AGENTIK1:` followed by unpadded uppercase RFC 4648 base32 of a binary payload. Prefix and base32 together stay inside the QR alphanumeric character set, the densest text mode a QR code offers. All integers are big-endian:
+
+| Bytes | Field |
+| --- | --- |
+| 1 | Version, `1` |
+| 1 | Relay selector: `0` the hosted relay (`wss://agentik-relay.agentikcl.workers.dev`), `1` a custom `wss://` relay, `2` a custom `ws://` loopback relay for development |
+| 32 | Ed25519 registration public key; `device_id` = SHA-256 of it, not carried |
+| 32 | X25519 Noise public key |
+| 32 | Invitation secret; the invitation id = SHA-256 of it, not carried |
+| 4 | Expiry, Unix seconds |
+| 64 | Ed25519 signature of the `PairingDescriptor` (`agentik-pairing-descriptor-v1` canonical encoding: version, relay URL, `device_id`, both public keys, invitation id, expiry) |
+| rest | Custom relay only: `host[:port][/path]` without the scheme |
+
+With the hosted relay the payload is 166 bytes and the text 275 characters, which is QR version 10 at error correction level M (57 by 57 modules). A custom relay of up to 22 bytes after the scheme still fits version 10. Each invitation has exactly one encoding: the relay must already be normalised, and the hosted relay always uses selector `0`. Parsers ignore whitespace and letter case so a wrapped or retyped text still works, and reject anything else, including the earlier JSON format.
+
+Both the daemon and the Mini App rebuild the descriptor and verify the signature against the registration key in the invitation, and both reject an expired invitation. The Mini App verifies it with WebCrypto Ed25519 and refuses the invitation where the WebView does not implement Ed25519. A valid signature only shows that the holder of that registration key published these keys and this relay together and that nothing was altered on the way. Anyone can sign a QR code with their own key, so access still depends on the Noise handshake and the local confirmation. A shared test vector in the Go and TypeScript suites keeps both parsers byte-compatible.
+
+The daemon prints the QR code in the terminal with Unicode half-block characters and a four-module quiet zone, 65 columns by 33 lines, with the invitation text underneath for pasting. On a start with no paired phone it prints a short welcome text, the QR code, and a new code each time the previous one expires; once a phone is paired it prints one status line, and `-pair` or the `pair` command shows a code on demand.
 
 The phone pins the PC's Noise key from the QR code. After the full handshake, the daemon verifies the invitation and the Telegram identity, then shows a local prompt. The user confirms this specific pending pairing and this specific phone public key.
 
@@ -503,7 +522,8 @@ The architecture is settled; the following are technical verification items for 
 - WebRTC through real NATs, TURN relaying, and `RTCPeerConnection` behaviour inside the Telegram Android and iOS WebViews;
 - Cloudflare reachability from a phone without a VPN, and the Telegram WebView's connection policy for WebRTC and STUN/TURN;
 - abuse limits for `ice_servers` credential issuance in a public deployment;
-- secure storage availability and WebView behaviour across the Telegram matrix;
+- secure storage availability and WebView behaviour across the Telegram matrix, including WebCrypto Ed25519, without which the Mini App refuses pairing invitations;
+- scanning the terminal QR code with real phone cameras from common terminal fonts, colours, and window sizes;
 - the supported Codex version and thread recovery after a crash;
 - actual sandbox capabilities on each OS;
 - limits on active channels, queues, and frames, and overall Free-tier capacity;

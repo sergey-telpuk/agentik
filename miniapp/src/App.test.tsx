@@ -6,7 +6,7 @@ import { createLiveApi } from "./api/live/liveApi";
 import { attachingRelay, FakeSocket, noiseDaemon, sessionEvent, type NoiseDaemon } from "./api/live/testing";
 import type { OpenLink } from "./api/live/connection";
 import { decodeBase32, encodeBase64Url } from "./encoding";
-import { asJson, NOW_MS, validWire } from "./pairing/testing";
+import { asText, NOW_MS, validWire } from "./pairing/testing";
 import type { TaskView } from "./protocol/messages";
 import { RelayClient } from "./relay/client";
 import { generateNoiseKeyPair, noiseChannelFactory } from "./secure/noise";
@@ -132,7 +132,7 @@ describe("App", () => {
     expect(container.textContent).not.toContain("Demo data");
 
     await click("Connect a computer");
-    await type(asJson(validWire()));
+    await type(asText(validWire()));
     await click("Check invitation");
     await settle(() => has("not trusted yet"));
     expect(container.textContent).toContain("not trusted yet");
@@ -152,18 +152,51 @@ describe("App", () => {
   it("rejects an expired invitation with a readable message", async () => {
     await render(services(new MemoryBackend()));
     await click("Connect a computer");
-    await type(asJson(validWire({ expires_at: NOW_MS / 1000 - 10 })));
+    await type(asText(validWire({ expires_at: NOW_MS / 1000 - 10 })));
     await click("Check invitation");
     await settle(() => container.querySelector('[role="alert"]') !== null);
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("expired");
     expect(container.textContent).not.toContain("Pin this computer");
   });
 
+  it("checks a scanned invitation and rejects a tampered scan", async () => {
+    const wire = validWire();
+    const text = asText(wire);
+    // One character changed inside the signature, as a misread QR code would.
+    const tampered = text.slice(0, 250) + (text[250] === "A" ? "B" : "A") + text.slice(251);
+    const scans = [tampered, text];
+    const prompts: string[] = [];
+    const scanning: AppServices = {
+      ...services(new MemoryBackend()),
+      runtime: {
+        ...noTelegramRuntime,
+        supportsMethod: (method) => method === "web_app_open_scan_qr_popup",
+        scanQr: (prompt) => {
+          prompts.push(prompt);
+          return Promise.resolve(scans.shift() ?? null);
+        },
+      },
+    };
+    await render(scanning);
+    await click("Connect a computer");
+
+    await click("Scan QR code");
+    await settle(() => container.querySelector('[role="alert"]') !== null);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("signature");
+    expect(container.textContent).not.toContain("Pin this computer");
+
+    await click("Scan QR code");
+    await settle(() => has("not trusted yet"));
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector("dl")?.textContent).toContain(String(wire["device_id"]));
+    expect(prompts).toHaveLength(2);
+  });
+
   it("does not render the invitation secret", async () => {
     await render(services(new MemoryBackend()));
     await click("Connect a computer");
     const wire = validWire();
-    await type(asJson(wire));
+    await type(asText(wire));
     await click("Check invitation");
     await settle(() => container.querySelector("dl") !== null);
     const summary = container.querySelector("dl")?.textContent ?? "";
@@ -237,7 +270,7 @@ describe("App", () => {
     const backend = new MemoryBackend("secure");
     await render(services(backend, { ...daemon.relay.wiring, secureChannel: noiseChannelFactory }));
     await click("Connect a computer");
-    await type(asJson(wire));
+    await type(asText(wire));
     await click("Check invitation");
     await settle(() => has("Pin this computer"));
     await click("Pin this computer");
