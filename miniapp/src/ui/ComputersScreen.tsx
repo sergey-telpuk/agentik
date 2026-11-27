@@ -66,7 +66,13 @@ export function ComputersScreen({ api, persistence, onAdd, onOpen, onSettings }:
       {listing.kind === "ready" && listing.computers.length === 0 && (
         <Empty title="No computers paired yet.">
           <ol className="steps">
-            <li>Install and start Agentik on your computer.</li>
+            <li>
+              Install and start Agentik on your computer (
+              <a href={`${import.meta.env.BASE_URL}downloads/`} target="_blank" rel="noopener noreferrer">
+                downloads for Mac
+              </a>
+              ).
+            </li>
             <li>It shows a pairing QR code.</li>
             <li>Tap “Connect a computer” below and scan it.</li>
           </ol>
