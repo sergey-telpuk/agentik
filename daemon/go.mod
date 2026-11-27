@@ -6,6 +6,7 @@ require (
 	github.com/coder/websocket v1.8.14
 	github.com/flynn/noise v1.1.0
 	modernc.org/sqlite v1.63.0
+	rsc.io/qr v0.2.0
 )
 
 require (
