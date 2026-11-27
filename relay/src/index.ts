@@ -7,6 +7,7 @@
  */
 
 import { DeviceRoom, type Env } from "./device-room";
+import { sourceKey } from "./limits";
 import { formatDeviceId, parseDeviceId } from "./protocol";
 
 export { DeviceRoom };
@@ -26,6 +27,13 @@ export default {
 
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected a WebSocket upgrade", { status: 426 });
+    }
+
+    // Checked here, before any Durable Object is woken, so a flood of
+    // connection attempts from one address costs as little as possible.
+    const { success } = await env.CONNECT_LIMITER.limit({ key: sourceKey(request) });
+    if (!success) {
+      return new Response("too many connection attempts", { status: 429 });
     }
 
     // The device is named in the query string so the Worker can route

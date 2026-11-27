@@ -15,7 +15,7 @@ import {
   createDevice,
   expectMessage,
 } from "./helpers";
-import { LIMITS } from "../src/device-room";
+import { LIMITS } from "../src/limits";
 import { maxMessageLength } from "../src/messages";
 import { decodeBase64, encodeBase64 } from "../src/protocol";
 

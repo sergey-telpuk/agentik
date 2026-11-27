@@ -20,6 +20,22 @@
     ]
   },
 
+  // Per-source-IP limits. src/limits.ts documents every relay limit and
+  // mirrors these values in SOURCE_RATE_LIMITS; keep the two in step.
+  // namespace_id must be unique per Cloudflare account.
+  "ratelimits": [
+    {
+      "name": "CONNECT_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 60, "period": 60 }
+    },
+    {
+      "name": "REGISTER_LIMITER",
+      "namespace_id": "1002",
+      "simple": { "limit": 10, "period": 60 }
+    }
+  ],
+
   "migrations": [
     {
       "tag": "v1",

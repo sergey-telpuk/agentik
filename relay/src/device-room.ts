@@ -43,45 +43,18 @@ import {
   sha256,
   verifyEd25519,
 } from "./protocol";
+import { LIMITS, sourceKey } from "./limits";
 
-/** Bindings available to the object. */
+/** Bindings available to the Worker and the object. */
 export interface Env {
   RELAY_ID: string;
   DEVICE: DurableObjectNamespace;
+  /** Per-source-IP WebSocket upgrades; see limits.ts. */
+  CONNECT_LIMITER: RateLimit;
+  /** Per-source-IP registration attempts; see limits.ts. */
+  REGISTER_LIMITER: RateLimit;
 }
 
-/**
- * Operational limits.
- *
- * These are the design starting points from the architecture document, not
- * measured capacity. They are collected here so that load testing can move
- * them in one place.
- */
-export const LIMITS = {
-  /** Largest frame payload the relay will forward, in bytes. */
-  maxFrameBytes: 32 * 1024,
-  /**
-   * How long a socket may stay unauthenticated (neither registered nor
-   * attached). Past it the socket is closed, whether or not it ever sends.
-   */
-  challengeTtlMs: 30_000,
-  /**
-   * Unauthenticated sockets per device. When full, the oldest is evicted to
-   * admit a new one, so stale sockets cannot lock out a real peer.
-   */
-  maxPending: 8,
-  /** Clients attached to one device at once. */
-  maxClients: 4,
-  /**
-   * A client with no frames in either direction for this long counts as
-   * idle, and may be evicted when all client slots are taken.
-   */
-  clientIdleMs: 30_000,
-  /** Frames per second from one socket, averaged over the window. */
-  maxFramesPerWindow: 120,
-  /** Length of the rate-limiting window. */
-  rateWindowMs: 1_000,
-} as const;
 
 /**
  * Per-socket state, stored as a hibernation attachment.
@@ -97,6 +70,11 @@ interface SocketState {
   challenge?: string;
   /** When the socket must have authenticated by (epoch ms). */
   challengeExpiresAt?: number;
+  /**
+   * Source address an unauthenticated socket connected from, kept only
+   * until it registers or attaches, for the per-IP registration limit.
+   */
+  sourceIp?: string;
   /** Relay-assigned identifier of an attached client. */
   connectionId?: string;
   /** Last frame sent by or delivered to a client (epoch ms). */
@@ -165,6 +143,7 @@ export class DeviceRoom implements DurableObject {
       role: "pending",
       challenge: challengeText,
       challengeExpiresAt: expiresAt,
+      sourceIp: sourceKey(request),
       windowStart: now,
       windowCount: 0,
     });
@@ -379,6 +358,16 @@ export class DeviceRoom implements DurableObject {
     if (payload.relayId !== this.#env.RELAY_ID) {
       // A signature made for another relay must not be usable here.
       this.#closeWith(ws, "unauthorized", "registration is addressed to another relay");
+      return;
+    }
+
+    // Every new device has to register, so limiting attempts per source
+    // bounds how fast one address can create devices. It runs before the
+    // signature check so a flood costs no cryptography.
+    const outcome = await this.#env.REGISTER_LIMITER.limit({ key: state.sourceIp ?? "unknown" });
+    if (!this.#stillVerifying(ws)) return;
+    if (!outcome.success) {
+      this.#closeWith(ws, "rate_limited", "too many registration attempts from this address");
       return;
     }
 
@@ -673,7 +662,9 @@ export class DeviceRoom implements DurableObject {
     const next: SocketState = { ...state, windowStart, windowCount };
     if (state.role === "client") next.lastActivity = now;
     writeState(ws, next);
-    return windowCount <= LIMITS.maxFramesPerWindow;
+    const allowed =
+      state.role === "device" ? LIMITS.maxDeviceFramesPerWindow : LIMITS.maxFramesPerWindow;
+    return windowCount <= allowed;
   }
 
   #send(ws: WebSocket, message: ServerMessage): void {

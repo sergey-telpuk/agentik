@@ -18,7 +18,8 @@ import {
   createDevice,
   expectMessage,
 } from "./helpers";
-import { LIMITS } from "../src/device-room";
+import type { DeviceRoom } from "../src/device-room";
+import { LIMITS } from "../src/limits";
 import { encodeBase64 } from "../src/protocol";
 
 type Attachment = Record<string, unknown>;
@@ -199,32 +200,59 @@ describe("eviction under slot pressure", () => {
 });
 
 describe("registration races", () => {
-  it("consumes the challenge before verifying, so a repeat on the socket is refused", async () => {
+  /**
+   * Delivers two messages to one socket's handler concurrently.
+   *
+   * The runtime hands a socket's messages to the object one at a time, so
+   * the handler is called directly to make two messages overlap at their
+   * awaits, which is the interleaving the synchronous challenge consumption
+   * guards against.
+   */
+  async function deliverConcurrently(
+    device: TestDevice,
+    challenge: Uint8Array,
+    messages: [string, string],
+  ): Promise<void> {
+    const text = encodeBase64(challenge);
+    await runInDurableObject(roomFor(device), async (instance: DeviceRoom, state) => {
+      const ws = state
+        .getWebSockets()
+        .find((s) => (s.deserializeAttachment() as Attachment)["challenge"] === text);
+      if (ws === undefined) throw new Error("pending socket not found");
+      await Promise.all(messages.map((m) => instance.webSocketMessage(ws, m)));
+    });
+  }
+
+  it("refuses a second register that overlaps the first on one socket", async () => {
     const device = await createDevice();
     const peer = await TestPeer.connect(device.deviceIdText);
     const challenge = await peer.challenge();
     const register = await buildRegister(device, { challenge });
 
-    // Both arrive before the first verification finishes.
-    peer.send(register);
-    peer.send(register);
+    await deliverConcurrently(device, challenge, [register, register]);
 
     const replies = [await peer.next(), await peer.next()];
-    const types = replies.map((r) => r.type).sort();
-    expect(types).toEqual(["error", "registered"]);
-    const error = replies.find((r) => r.type === "error");
-    expect(error).toMatchObject({ code: "bad_request" });
+    expect(replies.map((r) => r.type).sort()).toEqual(["error", "registered"]);
+    expect(replies.find((r) => r.type === "error")).toMatchObject({ code: "bad_request" });
+    await peer.expectSilence();
     expect(peer.closed).toBeNull();
     peer.close();
   });
 
-  it("refuses an attach sent while a registration is being verified", async () => {
+  it("refuses an attach that overlaps a registration on one socket", async () => {
     const device = await createDevice();
     const peer = await TestPeer.connect(device.deviceIdText);
     const challenge = await peer.challenge();
+    const attach = JSON.stringify({
+      type: "attach",
+      version: 1,
+      device_id: encodeBase64(device.deviceId),
+    });
 
-    peer.send(await buildRegister(device, { challenge }));
-    peer.sendJson({ type: "attach", version: 1, device_id: encodeBase64(device.deviceId) });
+    await deliverConcurrently(device, challenge, [
+      await buildRegister(device, { challenge }),
+      attach,
+    ]);
 
     const replies = [await peer.next(), await peer.next()];
     expect(replies.map((r) => r.type).sort()).toEqual(["error", "registered"]);

@@ -109,6 +109,17 @@ export async function buildRegister(
   });
 }
 
+const sourcePrefix = Array.from(crypto.getRandomValues(new Uint16Array(2)), (n) =>
+  n.toString(16),
+).join(":");
+let sourceCounter = 0;
+
+/** Returns a documentation-range IPv6 address no other connection uses. */
+export function uniqueSourceIp(): string {
+  sourceCounter += 1;
+  return `2001:db8:${sourcePrefix}::${sourceCounter.toString(16)}`;
+}
+
 /**
  * A connected peer that collects server messages.
  *
@@ -142,12 +153,17 @@ export class TestPeer {
     });
   }
 
-  /** Opens a connection to the relay for a device id. */
-  static async connect(deviceIdText: string): Promise<TestPeer> {
+  /**
+   * Opens a connection to the relay for a device id.
+   *
+   * Each connection comes from its own source address unless one is given,
+   * so the per-IP limits only bite in the tests that aim at them.
+   */
+  static async connect(deviceIdText: string, sourceIp = uniqueSourceIp()): Promise<TestPeer> {
     const response = await (
       await import("cloudflare:test")
     ).SELF.fetch(`https://relay.test/v1/connect?device=${deviceIdText}`, {
-      headers: { Upgrade: "websocket" },
+      headers: { Upgrade: "websocket", "CF-Connecting-IP": sourceIp },
     });
     const socket = response.webSocket;
     if (!socket) {
