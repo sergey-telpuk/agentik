@@ -124,6 +124,13 @@ export interface SessionOpenResult {
   readonly project_id: string;
   readonly agent: string;
   readonly last_seq: number;
+  /**
+   * Turns of the session, oldest first. Absent on computers that predate
+   * conversations; prompt and result text may be shortened per entry.
+   */
+  readonly tasks?: readonly TaskView[];
+  /** True when older turns were left out of `tasks`. */
+  readonly tasks_truncated?: boolean;
 }
 
 export interface TaskStartParams {

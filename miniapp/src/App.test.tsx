@@ -204,6 +204,16 @@ describe("App", () => {
         case "task.start":
           current = taskView("running", String(frame.params["prompt"]));
           return { result: { task: current } };
+        case "session.open":
+          return {
+            result: {
+              session_id: "s-1",
+              project_id: "repo",
+              agent: "codex",
+              last_seq: 1,
+              tasks: current === null ? [] : [current],
+            },
+          };
         case "task.get":
           return current === null ? { error: { code: "not_found", message: "task not found" } } : { result: { task: current } };
         case "events.resume":

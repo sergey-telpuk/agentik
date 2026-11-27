@@ -11,7 +11,8 @@ interface Props {
   readonly projectName: string;
   readonly now: () => number;
   readonly onNewTask: () => void;
-  readonly onOpenTask: (task: TaskSummary) => void;
+  /** Opens the conversation a task belongs to. */
+  readonly onOpenSession: (sessionId: string) => void;
   readonly onBack: () => void;
 }
 
@@ -22,7 +23,31 @@ type Listing =
 
 const REFRESH_MS = 2000;
 
-export function ProjectScreen({ api, computerId, projectId, projectName, now, onNewTask, onOpenTask, onBack }: Props) {
+interface Conversation {
+  readonly sessionId: string;
+  /** What the conversation is about: the first message. */
+  readonly title: string;
+  /** The newest turn decides the status. */
+  readonly latest: TaskSummary;
+  readonly turns: number;
+}
+
+/** One row per session: the first message as title, the newest turn as status. */
+function conversationsOf(tasks: readonly TaskSummary[]): Conversation[] {
+  const bySession = new Map<string, TaskSummary[]>();
+  for (const task of tasks) bySession.set(task.sessionId, [...(bySession.get(task.sessionId) ?? []), task]);
+  const rows: Conversation[] = [];
+  for (const [sessionId, group] of bySession) {
+    const ordered = [...group].sort((a, b) => a.createdAt - b.createdAt);
+    const first = ordered[0];
+    const latest = ordered.at(-1);
+    if (first === undefined || latest === undefined) continue;
+    rows.push({ sessionId, title: first.prompt, latest, turns: ordered.length });
+  }
+  return rows.sort((a, b) => b.latest.updatedAt - a.latest.updatedAt);
+}
+
+export function ProjectScreen({ api, computerId, projectId, projectName, now, onNewTask, onOpenSession, onBack }: Props) {
   const [listing, setListing] = useState<Listing>({ kind: "loading" });
   const [tick, setTick] = useState(0);
   const current = useNow(30_000, now);
@@ -38,6 +63,7 @@ export function ProjectScreen({ api, computerId, projectId, projectName, now, on
     };
   }, [api, computerId, projectId, tick]);
 
+  const conversations = listing.kind === "ready" ? conversationsOf(listing.tasks) : [];
   const hasActive = listing.kind === "ready" && listing.tasks.some((t) => !isFinalState(t.state));
   useEffect(() => {
     if (!hasActive) return;
@@ -73,19 +99,22 @@ export function ProjectScreen({ api, computerId, projectId, projectName, now, on
           earlier tasks yet.
         </p>
       )}
-      {listing.kind === "ready" && listing.tasks.length > 0 && (
+      {listing.kind === "ready" && conversations.length > 0 && (
         <ul className="card-list">
-          {listing.tasks.map((t) => {
-            const status = taskStatus(t.state);
+          {conversations.map((c) => {
+            const status = taskStatus(c.latest.state);
             return (
-              <li key={t.id} className={t.state === "awaiting_approval" ? "card card-attention" : "card"}>
-                <button type="button" className="card-main" onClick={() => onOpenTask(t)}>
-                  <span className="card-title clamp-2">{t.prompt}</span>
+              <li key={c.sessionId} className={c.latest.state === "awaiting_approval" ? "card card-attention" : "card"}>
+                <button type="button" className="card-main" onClick={() => onOpenSession(c.sessionId)}>
+                  <span className="card-title clamp-2">{c.title}</span>
                   <span className="card-title-row">
                     <StatusChip tone={status.tone} label={status.label} pulse={status.pulse} />
-                    <span className="card-meta">{relativeTime(t.createdAt, current)}</span>
+                    <span className="card-meta">
+                      {c.turns > 1 ? `${c.turns} messages · ` : ""}
+                      {relativeTime(c.latest.updatedAt, current)}
+                    </span>
                   </span>
-                  {t.state === "awaiting_approval" && <span className="card-meta attention">Needs your decision</span>}
+                  {c.latest.state === "awaiting_approval" && <span className="card-meta attention">Needs your decision</span>}
                 </button>
               </li>
             );

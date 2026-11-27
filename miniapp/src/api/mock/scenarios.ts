@@ -84,6 +84,8 @@ export type Step =
 export interface SeedTask {
   readonly projectId: string;
   readonly prompt: string;
+  /** Tasks sharing a key are turns of one conversation, oldest first. */
+  readonly sessionKey?: string;
   /** How long ago the task was created, in milliseconds. */
   readonly ageMs: number;
   /** Applied instantly at start-up, up to the end or the first approval. */
@@ -111,6 +113,8 @@ export interface ScenarioData {
   readonly agentStatus: "available" | "not_installed";
   /** Script for a task started from the phone. */
   newTaskSteps(projectName: string, agent: AgentId): readonly Step[];
+  /** Script for a follow-up message sent into an existing conversation. */
+  followUpSteps(projectName: string, agent: AgentId): readonly Step[];
   readonly connect: {
     /** Number of initial attempts that fail the handshake before one succeeds. */
     readonly failFirstAttempts: number;
@@ -180,6 +184,32 @@ function happySteps(projectName: string): Step[] {
       output:
         "Added a /healthz route to the relay.\n\n- It answers before routing, so it never wakes a Durable Object.\n- The response is marked no-store.\n- Relay tests pass (31 tests).",
       diff: HEALTH_DIFF,
+    },
+  ];
+}
+
+const REGRESSION_DIFF = `--- a/relay/src/index.test.ts
++++ b/relay/src/index.test.ts
+@@ -40,3 +40,10 @@ describe("relay", () => {
++  it("responds to /healthz without touching the Durable Object", async () => {
++    const response = await worker.fetch(new Request("https://relay.test/healthz"), env);
++    expect(response.status).toBe(200);
++    expect(await response.text()).toBe("ok");
++  });
+ });`;
+
+/** A short conversational reply: no commands, just an answer. */
+function shortReplySteps(): Step[] {
+  return [
+    { after: 500, kind: "state", state: "starting" },
+    { after: 600, kind: "state", state: "running", note: "Codex resumed the conversation" },
+    { after: 900, kind: "message", text: "Looking at what I changed earlier." },
+    {
+      after: 1100,
+      kind: "finish",
+      state: "succeeded",
+      output:
+        "I only touched relay/src/index.ts, and only to add the /healthz route. I did not change any existing route or the Durable Object code.",
     },
   ];
 }
@@ -278,11 +308,46 @@ function recoverySteps(): Step[] {
 }
 
 const HISTORY: readonly SeedTask[] = [
+  // One conversation with three turns on the same agent thread.
   {
     projectId: "proj_agentik",
+    sessionKey: "relay-health",
     prompt: "Add a health check endpoint to the relay",
     ageMs: 2 * HOUR,
     steps: happySteps("Agentik"),
+  },
+  {
+    projectId: "proj_agentik",
+    sessionKey: "relay-health",
+    prompt: "Now add a regression test for it",
+    ageMs: 2 * HOUR - 5 * MIN,
+    steps: [
+      { after: 500, kind: "state", state: "starting" },
+      { after: 600, kind: "state", state: "running", note: "Codex resumed the conversation" },
+      { after: 900, kind: "message", text: "Adding a test next to the existing relay tests." },
+      { after: 1000, kind: "file_change", path: "relay/src/index.test.ts", additions: 7, deletions: 0 },
+      {
+        after: 1200,
+        kind: "command",
+        command: "npm test -- --run relay",
+        exitCode: 0,
+        output: "Test Files  4 passed (4)\nTests  32 passed (32)",
+      },
+      {
+        after: 800,
+        kind: "finish",
+        state: "succeeded",
+        output: "Added a regression test for /healthz. The relay now has 32 passing tests.",
+        diff: REGRESSION_DIFF,
+      },
+    ],
+  },
+  {
+    projectId: "proj_agentik",
+    sessionKey: "relay-health",
+    prompt: "Did you touch anything else?",
+    ageMs: 2 * HOUR - 10 * MIN,
+    steps: shortReplySteps(),
   },
   {
     projectId: "proj_agentik",
@@ -374,6 +439,7 @@ export function scenarioData(name: ScenarioName): ScenarioData {
     computers: computers("online", HISTORY),
     agentStatus: "available",
     newTaskSteps: (projectName) => happySteps(projectName),
+    followUpSteps: () => shortReplySteps(),
     connect: { failFirstAttempts: 0, revokeAfterReadyMs: null },
     storageAvailable: true,
   };
@@ -391,11 +457,16 @@ export function scenarioData(name: ScenarioName): ScenarioData {
         ...base,
         computers: computers("online", [WAITING_APPROVAL_TASK, ...HISTORY]),
         newTaskSteps: (projectName) => approvalSteps(projectName),
+        followUpSteps: (projectName) => approvalSteps(projectName),
       };
     case "failed":
-      return { ...base, newTaskSteps: (projectName) => failedSteps(projectName) };
+      return {
+        ...base,
+        newTaskSteps: (projectName) => failedSteps(projectName),
+        followUpSteps: (projectName) => failedSteps(projectName),
+      };
     case "recovery":
-      return { ...base, newTaskSteps: () => recoverySteps() };
+      return { ...base, newTaskSteps: () => recoverySteps(), followUpSteps: () => recoverySteps() };
     case "revoked":
       return { ...base, connect: { failFirstAttempts: 0, revokeAfterReadyMs: 6000 } };
     case "codex_missing":

@@ -191,6 +191,25 @@ export interface StartTaskInput {
    * existing task; with different content it is a conflict (AGENTIK.md 7.2).
    */
   readonly requestId: string;
+  /**
+   * Continues this conversation: the computer runs the next turn on the same
+   * agent thread, so the agent remembers the earlier turns. Omit it to start a
+   * new conversation.
+   */
+  readonly sessionId?: string;
+}
+
+/**
+ * One conversation with an agent. Every turn is a task: the user's message is
+ * its prompt, the agent's reply is its outcome.
+ */
+export interface SessionView {
+  readonly sessionId: string;
+  readonly projectId: string;
+  /** Turns in the order they were sent, oldest first. */
+  readonly turns: readonly TaskSummary[];
+  /** True when older turns were left out because the computer bounds the reply. */
+  readonly truncated: boolean;
 }
 
 export interface RespondApprovalInput {
@@ -280,6 +299,8 @@ export interface AgentikApi {
   listAgents(computerId: string): Promise<ApiResult<Agent[]>>;
   listTasks(computerId: string, projectId: string): Promise<ApiResult<TaskSummary[]>>;
   getTask(computerId: string, taskId: string): Promise<ApiResult<TaskSummary>>;
+  /** The turns of one conversation, oldest first. */
+  getSession(computerId: string, projectId: string, sessionId: string): Promise<ApiResult<SessionView>>;
   startTask(computerId: string, input: StartTaskInput): Promise<ApiResult<TaskSummary>>;
   /**
    * Replays events after `afterSeq`, then delivers live ones. Unsubscribing

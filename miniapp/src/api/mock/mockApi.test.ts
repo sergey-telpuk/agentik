@@ -266,6 +266,92 @@ describe("tasks", () => {
   });
 });
 
+describe("conversations", () => {
+  it("seeds a multi-turn conversation in the happy path, oldest turn first", async () => {
+    const { api } = await setup("happy");
+    await connect(api, MAIN);
+    const tasks = value(await api.listTasks(MAIN, "proj_agentik"));
+    const first = tasks.find((t) => t.prompt === "Add a health check endpoint to the relay");
+    expect(first).toBeDefined();
+    const session = value(await api.getSession(MAIN, "proj_agentik", first?.sessionId ?? ""));
+    expect(session.turns.map((t) => t.prompt)).toEqual([
+      "Add a health check endpoint to the relay",
+      "Now add a regression test for it",
+      "Did you touch anything else?",
+    ]);
+    expect(new Set(session.turns.map((t) => t.sessionId)).size).toBe(1);
+    expect(session.turns.every((t) => t.state === "succeeded")).toBe(true);
+    const second = value(await api.getResult(MAIN, session.turns[1]?.id ?? ""));
+    expect(second.changes).toEqual([{ path: "relay/src/index.test.ts", additions: 7, deletions: 0 }]);
+  });
+
+  it("continues a conversation in the same session and refuses an unknown one", async () => {
+    const { api } = await setup("happy");
+    await connect(api, MAIN);
+    const first = value(await start(api, "proj_billing", "Look at the invoice rounding"));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(value(await api.getTask(MAIN, first.id)).state).toBe("succeeded");
+
+    const follow = value(
+      await api.startTask(MAIN, {
+        projectId: "proj_billing",
+        agent: "codex",
+        prompt: "And the tax rounding?",
+        requestId: "follow-1",
+        sessionId: first.sessionId,
+      }),
+    );
+    expect(follow.sessionId).toBe(first.sessionId);
+    expect(follow.id).not.toBe(first.id);
+    // A repeated request id returns the same turn; changed content is a conflict.
+    const again = await api.startTask(MAIN, {
+      projectId: "proj_billing",
+      agent: "codex",
+      prompt: "And the tax rounding?",
+      requestId: "follow-1",
+      sessionId: first.sessionId,
+    });
+    expect(value(again).id).toBe(follow.id);
+    expect(
+      await api.startTask(MAIN, {
+        projectId: "proj_billing",
+        agent: "codex",
+        prompt: "And the tax rounding?",
+        requestId: "follow-1",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "conflict" } });
+    // The previous turn must finish before the next one starts.
+    expect(
+      await api.startTask(MAIN, {
+        projectId: "proj_billing",
+        agent: "codex",
+        prompt: "Too early",
+        requestId: "follow-2",
+        sessionId: first.sessionId,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "busy" } });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(value(await api.getSession(MAIN, "proj_billing", first.sessionId)).turns.map((t) => t.id)).toEqual([
+      first.id,
+      follow.id,
+    ]);
+
+    expect(
+      await api.startTask(MAIN, {
+        projectId: "proj_billing",
+        agent: "codex",
+        prompt: "Hello?",
+        requestId: "follow-3",
+        sessionId: "ses_unknown",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "not_found" } });
+    expect(await api.getSession(MAIN, "proj_billing", "ses_unknown")).toMatchObject({
+      ok: false,
+      error: { code: "not_found" },
+    });
+  });
+});
+
 describe("approvals", () => {
   async function twoPendingApprovals() {
     const { api } = await setup("approval");

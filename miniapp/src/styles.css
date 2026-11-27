@@ -1076,6 +1076,137 @@ textarea[aria-invalid="true"] {
   color: var(--accent);
 }
 
+/* Conversation */
+
+.conversation {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 92%;
+  padding: 10px 14px;
+  border-radius: 18px;
+  animation: appear 0.2s ease-out;
+}
+
+.bubble-user {
+  align-self: flex-end;
+  border-bottom-right-radius: 6px;
+  background: var(--button);
+  color: var(--button-text);
+}
+
+.bubble-agent {
+  align-self: flex-start;
+  min-width: 55%;
+  border-bottom-left-radius: 6px;
+  background: var(--section-bg);
+  box-shadow: 0 0 0 1px var(--separator);
+}
+
+.bubble-text {
+  margin: 0;
+}
+
+.bubble-time {
+  align-self: flex-end;
+  font-size: 11px;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+.bubble-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.bubble-detail {
+  margin: 0;
+}
+
+.bubble-reply {
+  padding: 2px 0;
+}
+
+.bubble-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bubble-steps summary {
+  cursor: pointer;
+  color: var(--link);
+  font-size: 14px;
+  padding: 4px 0;
+}
+
+.bubble-steps[open] summary {
+  margin-bottom: 8px;
+}
+
+.bubble-changes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bubble-changes-title {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--section-header);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.composer-area {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.composer-input {
+  flex: 1;
+  min-height: 48px;
+  max-height: 160px;
+  resize: none;
+}
+
+.composer-send {
+  flex: none;
+  min-height: 48px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble {
+    animation: none;
+  }
+}
+
 /* Bottom sheet */
 
 .sheet-backdrop {

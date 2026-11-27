@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { createMockApi } from "./api/mock/mockApi";
 import type { ScenarioName } from "./api/mock/scenarios";
+import type { StartTaskInput } from "./api/types";
 import { NOW_MS } from "./pairing/testing";
 import type { AppServices } from "./services";
 import { MemoryBackend } from "./storage/fakes";
@@ -29,20 +30,32 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/** Every `startTask` input the app sent, in order. */
+let startInputs: StartTaskInput[] = [];
+
 function services(scenario: ScenarioName): AppServices {
+  startInputs = [];
   return {
     runtime: noTelegramRuntime,
     openStore: () => PinnedDeviceStore.open({ secure: new MemoryBackend(), device: null }),
     now: () => Date.now(),
-    createApi: (store) =>
-      createMockApi({
+    createApi: (store) => {
+      const api = createMockApi({
         scenario,
         store,
         runtime: noTelegramRuntime,
         appVersion: "9.9.9",
         describeStorage: () =>
           Promise.resolve({ secureStorage: "available", deviceStorage: "unavailable", active: "secure", note: null }),
-      }),
+      });
+      return {
+        ...api,
+        startTask: (computerId, input) => {
+          startInputs.push(input);
+          return api.startTask(computerId, input);
+        },
+      };
+    },
   };
 }
 
@@ -172,17 +185,60 @@ describe("App flows on mock data", () => {
     expect(find("Start task").disabled).toBe(true);
     await typePrompt("Make the relay tests pass");
     await click("Start task", 0);
-    expect(heading()).toBe("Task");
+    expect(heading()).toBe("Conversation");
     expect(container.textContent).toContain("Closing the app does not cancel the task");
     await advance(3000);
-    expect(container.textContent).toContain("Running");
+    expect(container.querySelector(".bubble-agent .chip-label")?.textContent).toBe("running");
     expect(find("Stop task").disabled).toBe(false);
+    expect(find("Send").disabled).toBe(true);
     await advance(20_000);
-    expect(container.querySelector(".chip-label")?.textContent).toBe("succeeded");
-    await click("View result", 10);
-    expect(heading()).toBe("Result");
+    expect(container.querySelector(".bubble-agent .chip-label")?.textContent).toBe("succeeded");
     expect(container.textContent).toContain("Added a /healthz route");
     expect(container.textContent).toContain("relay/src/index.ts");
+    expect(container.textContent).not.toContain("Closing the app does not cancel the task");
+    expect(find("Copy")).toBeDefined();
+  });
+
+  it("shows a seeded conversation turn by turn and sends a follow-up into the same session", async () => {
+    await openMainProject("happy", "Agentik");
+    // One row per conversation, titled by its first message.
+    expect(container.textContent).toContain("Add a health check endpoint to the relay");
+    expect(container.textContent).toContain("3 messages");
+    expect(container.textContent).not.toContain("Now add a regression test for it");
+
+    await click("Add a health check endpoint to the relay", 100);
+    expect(heading()).toBe("Conversation");
+    const prompts = [...container.querySelectorAll(".bubble-user .bubble-text")].map((p) => p.textContent);
+    expect(prompts).toEqual([
+      "Add a health check endpoint to the relay",
+      "Now add a regression test for it",
+      "Did you touch anything else?",
+    ]);
+    expect(container.querySelectorAll(".bubble-agent")).toHaveLength(3);
+    expect(container.textContent).toContain("Added a regression test for /healthz");
+    expect(container.textContent).toContain("relay/src/index.test.ts");
+    expect(find("Send").disabled).toBe(true);
+
+    await typePrompt("Thanks. Anything left to do?");
+    expect(find("Send").disabled).toBe(false);
+    await click("Send", 0);
+    expect(startInputs).toHaveLength(1);
+    expect(startInputs[0]?.sessionId).toBeDefined();
+    expect(startInputs[0]?.prompt).toBe("Thanks. Anything left to do?");
+    // The composer is cleared, the message is in the conversation, and Send waits for the reply.
+    expect(container.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("");
+    expect(container.querySelectorAll(".bubble-user")).toHaveLength(4);
+    expect(find("Send").disabled).toBe(true);
+    await advance(10_000);
+    expect(container.querySelectorAll(".bubble-agent")).toHaveLength(4);
+    expect(container.textContent).toContain("I only touched relay/src/index.ts");
+    await typePrompt("Great");
+    expect(find("Send").disabled).toBe(false);
+    await click("Send", 10_000);
+    expect(startInputs).toHaveLength(2);
+    expect(startInputs[1]?.sessionId).toBe(startInputs[0]?.sessionId);
+    expect(startInputs[1]?.requestId).not.toBe(startInputs[0]?.requestId);
+    expect(container.querySelectorAll(".bubble-user")).toHaveLength(5);
   });
 
   it("stops a task only after confirmation and shows cancelled when confirmed", async () => {
@@ -199,9 +255,12 @@ describe("App flows on mock data", () => {
     await act(async () => confirm?.click());
     await advance(0);
     expect(container.textContent).toContain("Stopping… waiting for the computer");
-    expect(container.querySelector(".chip-label")?.textContent).toBe("stop requested");
+    expect(container.querySelector(".bubble-agent .chip-label")?.textContent).toBe("stop requested");
     await advance(2000);
-    expect(container.querySelector(".chip-label")?.textContent).toBe("cancelled");
+    expect(container.querySelector(".bubble-agent .chip-label")?.textContent).toBe("cancelled");
+    // A stopped turn leaves the conversation open for the next message.
+    await typePrompt("Never mind");
+    expect(find("Send").disabled).toBe(false);
   });
 
   it("opens the approval sheet with the exact operation and applies the decision to that request only", async () => {
@@ -222,7 +281,7 @@ describe("App flows on mock data", () => {
     await click("Deny", 10);
     expect(container.textContent).toContain("You denied this request.");
     await advance(5000);
-    expect(container.querySelector(".chip-label")?.textContent).toBe("succeeded");
+    expect(container.querySelector(".bubble-agent .chip-label")?.textContent).toBe("succeeded");
   });
 
   it("shows recovery_required with its explanation and no automatic retry", async () => {
@@ -230,12 +289,14 @@ describe("App flows on mock data", () => {
     await click("New task", 100);
     await typePrompt("Regenerate vectors");
     await click("Start task", 10_000);
-    expect(container.querySelector(".chip-label")?.textContent).toBe("recovery required");
-    await click("View result", 10);
+    expect(container.querySelector(".bubble-agent .chip-label")?.textContent).toBe("recovery required");
     expect(container.textContent).toContain("The outcome is unknown");
     expect(container.textContent).toContain("never restarts such a task automatically");
-    await click("Start a new task with the same text", 100);
+    // Nothing was started again; the message only returns to the composer, for the user to send.
+    expect(startInputs).toHaveLength(1);
+    await click("Put this message back in the composer", 10);
     expect(container.querySelector("textarea")?.value).toBe("Regenerate vectors");
+    expect(startInputs).toHaveLength(1);
   });
 
   it("shows a failed connection with Retry for an offline computer", async () => {

@@ -33,6 +33,7 @@ import {
   type Computer,
   type ComputerStatus,
   type Diagnostics,
+  type SessionView,
   type TaskEvent,
   type TaskSummary,
   type TaskUpdate,
@@ -298,13 +299,33 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
       return call(computerId, async (rpc) => remember(computerId, (await rpc.getTask(taskId)).task));
     },
 
+    async getSession(computerId, projectId, sessionId) {
+      return call(computerId, async (rpc): Promise<SessionView> => {
+        const opened = await rpc.openSession({ project_id: projectId, session_id: sessionId });
+        const turns = new Map<string, TaskSummary>();
+        for (const view of opened.tasks ?? []) turns.set(view.task_id, remember(computerId, view));
+        // A computer that does not list turns yet still knows the ones this phone started.
+        for (const known of tasks.values()) {
+          if (known.computerId !== computerId || known.view.session_id !== sessionId || turns.has(known.view.task_id)) continue;
+          turns.set(known.view.task_id, taskSummaryFromView(known.view, lastSeq.get(known.view.task_id) ?? 0));
+        }
+        return {
+          sessionId: opened.session_id,
+          projectId: opened.project_id,
+          turns: [...turns.values()].sort((a, b) => a.createdAt - b.createdAt),
+          truncated: opened.tasks_truncated === true,
+        };
+      });
+    },
+
     async startTask(computerId, input) {
       const prompt = input.prompt.trim();
       if (prompt === "") return fail("invalid", "Describe the task first.");
       if (prompt.length > MAX_PROMPT_LENGTH) {
         return fail("invalid", `The task description is longer than ${MAX_PROMPT_LENGTH} characters.`);
       }
-      const content = JSON.stringify([computerId, input.projectId, input.agent, prompt]);
+      const sessionId = input.sessionId ?? null;
+      const content = JSON.stringify([computerId, input.projectId, sessionId, input.agent, prompt]);
       const previous = requests.get(input.requestId);
       if (previous !== undefined && previous !== content) {
         return fail("conflict", "This request id was already used for a different task.");
@@ -314,7 +335,7 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
       // answer never starts a second task (AGENTIK.md section 7.2).
       return call(computerId, async (rpc) => {
         const result = await rpc.startTask(
-          { project_id: input.projectId, session_id: null, agent: input.agent, prompt },
+          { project_id: input.projectId, session_id: sessionId, agent: input.agent, prompt },
           input.requestId,
         );
         return remember(computerId, result.task);

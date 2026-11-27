@@ -438,6 +438,97 @@ describe("live AgentikApi: tasks over the inner protocol", () => {
     expect(listed.ok && listed.value.map((t) => [t.id, t.state])).toEqual([["task-1111-2222", "succeeded"]]);
   });
 
+  it("continues a session with its id, reuses the id on retry, and lists the session's turns", async () => {
+    const f = await fixture();
+    await pinConfirmed(f);
+    const first = task({ task_id: "task-1", state: "succeeded", prompt: "first", result_text: "one", created_at: 1000 });
+    const second = task({ task_id: "task-2", state: "running", prompt: "second", created_at: 1010 });
+    const daemon = plainDaemon(
+      paired((frame) => {
+        switch (frame.method) {
+          case "task.start":
+            return { result: { task: second, deduplicated: false } };
+          case "session.open":
+            return {
+              result: {
+                session_id: "sess-1111-2222",
+                project_id: "proj-1",
+                agent: "codex",
+                last_seq: 4,
+                tasks: [first, second],
+                tasks_truncated: true,
+              },
+            };
+          default:
+            return undefined;
+        }
+      }),
+    );
+    const api = liveApi(f, { createRelayClient: attachingRelay().createRelayClient, secureChannel: daemon.secureChannel });
+    const id = f.invitation.deviceIdText;
+    const { states } = track(api, id);
+    await until(() => last(states)?.phase === "ready", "ready");
+
+    const input = {
+      projectId: "proj-1",
+      agent: "codex" as const,
+      prompt: "second",
+      requestId: "req-follow",
+      sessionId: "sess-1111-2222",
+    };
+    const started = await api.startTask(id, input);
+    expect(started.ok && started.value.sessionId).toBe("sess-1111-2222");
+    expect(daemon.requests.find((r) => r.method === "task.start")?.params).toEqual({
+      project_id: "proj-1",
+      session_id: "sess-1111-2222",
+      agent: "codex",
+      prompt: "second",
+    });
+    // The same request id for another session is a conflict, decided locally.
+    expect(await api.startTask(id, { ...input, sessionId: "sess-other" })).toMatchObject({
+      ok: false,
+      error: { code: "conflict" },
+    });
+
+    const opened = await api.getSession(id, "proj-1", "sess-1111-2222");
+    expect(daemon.requests.find((r) => r.method === "session.open")?.params).toEqual({
+      project_id: "proj-1",
+      session_id: "sess-1111-2222",
+    });
+    expect(opened.ok && opened.value.turns.map((t) => [t.id, t.state])).toEqual([
+      ["task-1", "succeeded"],
+      ["task-2", "running"],
+    ]);
+    expect(opened.ok && opened.value.truncated).toBe(true);
+  });
+
+  it("lists the turns this phone knows when the computer does not list a session's turns yet", async () => {
+    const f = await fixture();
+    await pinConfirmed(f);
+    const only = task({ task_id: "task-9", state: "running", prompt: "mine" });
+    const daemon = plainDaemon(
+      paired((frame) => {
+        switch (frame.method) {
+          case "task.start":
+            return { result: { task: only, deduplicated: false } };
+          case "session.open":
+            return { result: { session_id: "sess-1111-2222", project_id: "proj-1", agent: "codex", last_seq: 1 } };
+          default:
+            return undefined;
+        }
+      }),
+    );
+    const api = liveApi(f, { createRelayClient: attachingRelay().createRelayClient, secureChannel: daemon.secureChannel });
+    const id = f.invitation.deviceIdText;
+    const { states } = track(api, id);
+    await until(() => last(states)?.phase === "ready", "ready");
+
+    await api.startTask(id, { projectId: "proj-1", agent: "codex", prompt: "mine", requestId: "r-9" });
+    const opened = await api.getSession(id, "proj-1", "sess-1111-2222");
+    expect(opened.ok && opened.value.turns.map((t) => t.id)).toEqual(["task-9"]);
+    expect(opened.ok && opened.value.truncated).toBe(false);
+  });
+
   it("reuses the request id after a timeout, cancels, and resumes events after a reconnect", async () => {
     const f = await fixture();
     await pinConfirmed(f);

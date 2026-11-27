@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { SCENARIOS, SCENARIO_DESCRIPTION } from "./api/mock/scenarios";
-import type { AgentikApi, Computer, ConnectionState } from "./api/types";
+import type { AgentikApi, Computer, ConnectionState, TaskSummary } from "./api/types";
 import { createDefaultServices, type AppServices } from "./services";
 import type { PinnedDeviceStore } from "./storage/pinnedDevices";
 import { AccessEndedScreen } from "./ui/AccessEndedScreen";
@@ -9,9 +9,8 @@ import { ComputersScreen } from "./ui/ComputersScreen";
 import { NewTaskScreen } from "./ui/NewTaskScreen";
 import { PairScreen } from "./ui/PairScreen";
 import { ProjectScreen } from "./ui/ProjectScreen";
-import { ResultScreen } from "./ui/ResultScreen";
 import { SettingsScreen, type ScenarioOption } from "./ui/SettingsScreen";
-import { TaskScreen } from "./ui/TaskScreen";
+import { SessionScreen } from "./ui/SessionScreen";
 
 type Route =
   | { readonly name: "computers" }
@@ -27,8 +26,15 @@ type Route =
       readonly projectName: string;
       readonly initialPrompt: string;
     }
-  | { readonly name: "task"; readonly computer: Computer; readonly taskId: string; readonly projectId: string; readonly projectName: string }
-  | { readonly name: "result"; readonly computer: Computer; readonly taskId: string; readonly projectId: string; readonly projectName: string }
+  | {
+      readonly name: "session";
+      readonly computer: Computer;
+      readonly sessionId: string;
+      readonly projectId: string;
+      readonly projectName: string;
+      /** The turn that was just started, shown while the rest of the conversation loads. */
+      readonly initialTurn: TaskSummary | null;
+    }
   | { readonly name: "access_ended"; readonly computer: Computer; readonly message: string };
 
 interface Props {
@@ -267,7 +273,7 @@ function Screen({ route, ready, services, connection, listKey, scenarios, push, 
           projectName={route.projectName}
           now={now}
           onNewTask={() => push({ ...route, name: "new_task", initialPrompt: "" })}
-          onOpenTask={(t) => push({ ...route, name: "task", taskId: t.id })}
+          onOpenSession={(sessionId) => push({ ...route, name: "session", sessionId, initialTurn: null })}
           onBack={back}
         />
       );
@@ -283,45 +289,29 @@ function Screen({ route, ready, services, connection, listKey, scenarios, push, 
           newRequestId={newRequestId}
           onStarted={(task) =>
             replace({
-              name: "task",
+              name: "session",
               computer: route.computer,
               projectId: route.projectId,
               projectName: route.projectName,
-              taskId: task.id,
+              sessionId: task.sessionId,
+              initialTurn: task,
             })
           }
           onBack={back}
         />
       );
-    case "task":
+    case "session":
       return (
-        <TaskScreen
+        <SessionScreen
           api={api}
           computerId={route.computer.id}
-          taskId={route.taskId}
+          projectId={route.projectId}
           projectName={route.projectName}
+          sessionId={route.sessionId}
+          initialTurn={route.initialTurn}
           now={now}
-          onOpenResult={() => push({ ...route, name: "result" })}
-          onBack={back}
-        />
-      );
-    case "result":
-      return (
-        <ResultScreen
-          api={api}
-          computerId={route.computer.id}
-          taskId={route.taskId}
-          projectName={route.projectName}
           copyText={copyToClipboard}
-          onNewTask={(prompt) =>
-            push({
-              name: "new_task",
-              computer: route.computer,
-              projectId: route.projectId,
-              projectName: route.projectName,
-              initialPrompt: prompt,
-            })
-          }
+          newRequestId={newRequestId}
           onBack={back}
         />
       );

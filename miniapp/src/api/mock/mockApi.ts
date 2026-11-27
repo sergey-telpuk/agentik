@@ -31,6 +31,7 @@ import {
   type Diagnostics,
   type FileChange,
   type Project,
+  type SessionView,
   type StartTaskInput,
   type TaskEvent,
   type TaskResult,
@@ -115,13 +116,13 @@ class MockTask {
   readonly #ids: IdSource;
 
   constructor(
-    init: { projectId: string; agent: AgentId; prompt: string; createdAt: number },
+    init: { projectId: string; agent: AgentId; prompt: string; createdAt: number; sessionId?: string },
     steps: readonly Step[],
     now: () => number,
     ids: IdSource,
   ) {
     this.id = ids.next("task");
-    this.sessionId = ids.next("ses");
+    this.sessionId = init.sessionId ?? ids.next("ses");
     this.projectId = init.projectId;
     this.agent = init.agent;
     this.prompt = init.prompt;
@@ -364,9 +365,21 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
       source: "demo",
       connectAttempts: 0,
     };
+    const seededSessions = new Map<string, string>();
     for (const seedTask of [...seed.tasks].sort((a, b) => b.ageMs - a.ageMs)) {
+      let sessionId: string | undefined;
+      if (seedTask.sessionKey !== undefined) {
+        sessionId = seededSessions.get(seedTask.sessionKey) ?? ids.next("ses");
+        seededSessions.set(seedTask.sessionKey, sessionId);
+      }
       const task = new MockTask(
-        { projectId: seedTask.projectId, agent: "codex", prompt: seedTask.prompt, createdAt: start - seedTask.ageMs },
+        {
+          projectId: seedTask.projectId,
+          agent: "codex",
+          prompt: seedTask.prompt,
+          createdAt: start - seedTask.ageMs,
+          ...(sessionId === undefined ? {} : { sessionId }),
+        },
         seedTask.steps,
         now,
         ids,
@@ -615,6 +628,18 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
       return task.ok ? ok(task.value.summary()) : task;
     },
 
+    async getSession(computerId, projectId, sessionId) {
+      const record = await session(computerId);
+      if (!record.ok) return record;
+      const turns = [...record.value.tasks.values()]
+        .filter((t) => t.projectId === projectId && t.sessionId === sessionId)
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .map((t) => t.summary());
+      if (turns.length === 0) return fail("not_found", "No such conversation on this computer.");
+      const view: SessionView = { sessionId, projectId, turns, truncated: false };
+      return ok(view);
+    },
+
     async startTask(computerId, input: StartTaskInput) {
       const record = await session(computerId);
       if (!record.ok) return record;
@@ -625,12 +650,19 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
       if (prompt.length > MAX_PROMPT_LENGTH) {
         return fail("invalid", `The task description is longer than ${MAX_PROMPT_LENGTH} characters.`);
       }
-      const key = JSON.stringify([computerId, input.projectId, input.agent, prompt]);
+      const sessionId = input.sessionId ?? null;
+      const key = JSON.stringify([computerId, input.projectId, sessionId, input.agent, prompt]);
       const previous = requests.get(input.requestId);
       if (previous !== undefined) {
         return previous.key === key
           ? ok(previous.task.summary())
           : fail("conflict", "This request id was already used for a different task.");
+      }
+      if (
+        sessionId !== null &&
+        ![...record.value.tasks.values()].some((t) => t.projectId === input.projectId && t.sessionId === sessionId)
+      ) {
+        return fail("not_found", "No such conversation in this project.");
       }
       if (agents().find((a) => a.id === input.agent)?.status !== "available") {
         return fail(
@@ -645,8 +677,14 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
         return fail("busy", "Another task is still active in this project. Only one active task per project is allowed.");
       }
       const task = new MockTask(
-        { projectId: input.projectId, agent: input.agent, prompt, createdAt: now() },
-        data.newTaskSteps(project.name, input.agent),
+        {
+          projectId: input.projectId,
+          agent: input.agent,
+          prompt,
+          createdAt: now(),
+          ...(sessionId === null ? {} : { sessionId }),
+        },
+        sessionId === null ? data.newTaskSteps(project.name, input.agent) : data.followUpSteps(project.name, input.agent),
         now,
         ids,
       );
