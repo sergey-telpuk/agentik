@@ -238,6 +238,18 @@ func (s *Service) HasActiveInvitation(ctx context.Context) (bool, error) {
 	return count > 0, nil
 }
 
+// PairedClientCount returns how many phones are currently paired with this
+// computer, that is trusted clients that have not been revoked.
+func (s *Service) PairedClientCount(ctx context.Context) (int, error) {
+	var count int
+	if err := s.db.SQL().QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM trusted_clients WHERE revoked_at IS NULL`,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("pairing: count paired clients: %w", err)
+	}
+	return count, nil
+}
+
 // SubmitPairing validates a pairing submission from a phone over a completed
 // Noise XX handshake and queues it for local confirmation on the computer.
 //

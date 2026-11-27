@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { encodeBase64Url } from "../../encoding";
 import { parseInvitation, type UntrustedInvitation } from "../../pairing/invitation";
 import { pinnedDeviceFromInvitation } from "../../pairing/pin";
-import { asJson, NOW_MS, NOW_S, validWire } from "../../pairing/testing";
+import { asText, NOW_MS, NOW_S, validWire } from "../../pairing/testing";
 import type { TaskView } from "../../protocol/messages";
 import { RelayClient } from "../../relay/client";
 import { generateNoiseKeyPair, noiseChannelFactory, type NoiseKeyPair } from "../../secure/noise";
@@ -43,7 +43,7 @@ interface Fixture {
 async function fixture(): Promise<Fixture> {
   const keys = await generateNoiseKeyPair();
   const wire = validWire({ noise_public_key: encodeBase64Url(keys.publicKey) });
-  const parsed = parseInvitation(asJson(wire), NOW_MS);
+  const parsed = await parseInvitation(asText(wire), NOW_MS);
   if (!parsed.ok) throw new Error("invalid test wire");
   const backend = new MemoryBackend("secure");
   const store = await PinnedDeviceStore.open({ secure: backend, device: null });

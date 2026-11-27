@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseInvitation } from "../../pairing/invitation";
-import { NOW_MS, validWire } from "../../pairing/testing";
+import { asText, NOW_MS, validWire } from "../../pairing/testing";
 import { MemoryBackend } from "../../storage/fakes";
 import { PinnedDeviceStore } from "../../storage/pinnedDevices";
 import { noTelegramRuntime } from "../../telegram/runtime";
@@ -103,7 +103,7 @@ describe("computers", () => {
 
   it("pins an invitation as pending confirmation and forgets it", async () => {
     const { api, backend } = await setup("empty");
-    const parsed = parseInvitation(JSON.stringify(validWire()), NOW_MS);
+    const parsed = await parseInvitation(asText(validWire()), NOW_MS);
     if (!parsed.ok) throw new Error("fixture invitation is invalid");
     const computer = value(await api.pairComputer(parsed.value));
     expect(computer.status).toBe("pending_confirmation");

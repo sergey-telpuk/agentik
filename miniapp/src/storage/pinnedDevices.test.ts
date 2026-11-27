@@ -2,14 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeBase64Url } from "../encoding";
 import { parseInvitation } from "../pairing/invitation";
 import { pinnedDeviceFromInvitation } from "../pairing/pin";
-import { asJson, filled, NOW_MS, validWire } from "../pairing/testing";
+import { asText, filled, NOW_MS, validWire } from "../pairing/testing";
 import { MemoryBackend } from "./fakes";
 import { MAX_PINNED_DEVICES, PinnedDeviceStore, type PinnedDevice } from "./pinnedDevices";
 
+const parsed = await parseInvitation(asText(validWire()), NOW_MS);
+if (!parsed.ok) throw new Error("fixture invitation is invalid");
+const fixtureInvitation = parsed.value;
+
 function device(overrides: Partial<PinnedDevice> = {}): PinnedDevice {
-  const parsed = parseInvitation(asJson(validWire()), NOW_MS);
-  if (!parsed.ok) throw new Error("fixture invitation is invalid");
-  return { ...pinnedDeviceFromInvitation(parsed.value, NOW_MS / 1000), ...overrides };
+  return { ...pinnedDeviceFromInvitation(fixtureInvitation, NOW_MS / 1000), ...overrides };
 }
 
 describe("PinnedDeviceStore: persistence selection", () => {
