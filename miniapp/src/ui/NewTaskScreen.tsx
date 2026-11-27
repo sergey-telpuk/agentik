@@ -64,6 +64,8 @@ export function NewTaskScreen({
     };
   }, [api, computerId]);
 
+  const available = agents?.filter((a) => a.status === "available") ?? [];
+  const unavailable = agents?.filter((a) => a.status !== "available") ?? [];
   const selected = agents?.find((a) => a.id === agent);
   const models = selected?.status === "available" ? (selected.models ?? []) : [];
   // A model from another agent's list (or one that vanished) is never sent.
@@ -150,30 +152,51 @@ export function NewTaskScreen({
           </div>
         )}
 
-        <fieldset className="field">
-          <legend>Agent</legend>
-          {agents === null && error === null && <SkeletonList rows={1} label="Loading agents" />}
-          {agents?.map((a) => (
-            <label key={a.id} className={a.status === "available" ? "choice" : "choice choice-disabled"}>
-              <input
-                type="radio"
-                name="agent"
-                value={a.id}
-                checked={agent === a.id}
-                onChange={() => {
-                  setAgent(a.id);
-                  setModel("");
-                }}
-                disabled={busy || a.status !== "available"}
-              />
-              <span className="choice-text">
-                <span className="choice-title">{a.name}</span>
-                <span className="hint">{agentLine(a, computerName)}</span>
-              </span>
-            </label>
-          ))}
-          <p className="hint">Agents that are not ready are shown but cannot be selected.</p>
-        </fieldset>
+        {agents === null && error === null && <SkeletonList rows={1} label="Loading agents" />}
+
+        {/* With one usable agent there is no choice to make, so naming it is
+            enough. The others are only worth listing when picking matters. */}
+        {available.length === 1 && selected !== undefined && (
+          <p className="hint">
+            {selected.name} on {computerName}
+            {unavailable.length > 0 && ` · ${unavailable.length} other agent${unavailable.length === 1 ? "" : "s"} found but not supported yet`}
+          </p>
+        )}
+
+        {available.length > 1 && (
+          <fieldset className="field">
+            <legend>Agent</legend>
+            {agents?.map((a) => (
+              <label key={a.id} className={a.status === "available" ? "choice" : "choice choice-disabled"}>
+                <input
+                  type="radio"
+                  name="agent"
+                  value={a.id}
+                  checked={agent === a.id}
+                  onChange={() => {
+                    setAgent(a.id);
+                    setModel("");
+                  }}
+                  disabled={busy || a.status !== "available"}
+                />
+                <span className="choice-text">
+                  <span className="choice-title">{a.name}</span>
+                  <span className="hint">{agentLine(a, computerName)}</span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+        )}
+
+        {available.length === 0 && agents !== null && (
+          <Notice tone="warn" title="No agent is ready">
+            <p>
+              {unavailable.length === 0
+                ? `No coding agent was found on ${computerName}. Install Codex there and sign in.`
+                : `${unavailable.length} agent${unavailable.length === 1 ? " was" : "s were"} found on ${computerName}, but none is usable yet. Install Codex there and sign in.`}
+            </p>
+          </Notice>
+        )}
 
         {selected?.status === "available" && (
           <div className="field">
