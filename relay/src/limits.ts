@@ -85,6 +85,24 @@ export const LIMITS = {
    * Malformed or refused messages and keepalive pings do not count.
    */
   clientIdleMs: 30_000,
+  /**
+   * TURN credentials one device may be issued per day.
+   *
+   * A device asks once per relay registration, so this is generous for
+   * ordinary use and still bounds a device that reconnects in a loop.
+   */
+  maxTurnIssuesPerDevice: 50,
+  /**
+   * TURN credentials the relay issues per day in all.
+   *
+   * The relay's TURN key is billed to whoever runs it, so this is the stop
+   * that makes going over the free quota impossible rather than unlikely:
+   * past it the relay reports TURN as unavailable and devices fall back to
+   * direct paths and STUN.
+   */
+  maxTurnIssuesPerDay: 5_000,
+  /** The window both TURN counters reset on. */
+  turnWindowMs: 24 * 60 * 60 * 1000,
   /** Messages per window from one client socket. */
   maxMessagesPerWindow: 120,
   /** Messages per window from the device, which multiplexes every client. */

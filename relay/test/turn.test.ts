@@ -35,7 +35,7 @@ function stubProvider(reply: unknown, status = 201): ReturnType<typeof vi.fn> {
 describe("minting TURN credentials", () => {
   it("asks the provider and drops the port browsers block", async () => {
     const fetchMock = stubProvider(CLOUDFLARE_REPLY);
-    const minted = await mintIceServers({ keyId: "key-1", token: "secret-token" });
+    const minted = await mintIceServers({ endpoint: "https://provider.example/creds?apiKey=secret-token" });
 
     expect(minted.expiresIn).toBe(TURN_TTL_SECONDS);
     expect(minted.iceServers).toHaveLength(2);
@@ -46,21 +46,54 @@ describe("minting TURN credentials", () => {
 
     // The relay's key authenticates it to the provider and must not travel
     // any further than that request.
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer secret-token");
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("secret-token");
     expect(JSON.stringify(minted)).not.toContain("secret-token");
   });
 
+  it("reads a provider that answers with a bare array and string urls", async () => {
+    // Metered answers that way; Cloudflare wraps it in an object and uses
+    // arrays. Both have to work, because the provider is configuration.
+    stubProvider([
+      { urls: "stun:turn.example:80" },
+      { urls: "turn:turn.example:443?transport=tcp", username: "u", credential: "c" },
+    ]);
+    const minted = await mintIceServers({ endpoint: "https://provider.example/creds?apiKey=k" });
+    expect(minted.iceServers).toHaveLength(2);
+    expect(minted.iceServers[0]?.urls).toEqual(["stun:turn.example:80"]);
+    expect(minted.iceServers[1]?.credential).toBe("c");
+  });
+
+  it("uses a configured server list without calling anyone", async () => {
+    // Metered issues long-lived credentials as a ready-made list; there is
+    // no request to make, and no key to spend.
+    const fetchMock = stubProvider([]);
+    const minted = await mintIceServers({
+      servers: JSON.stringify([
+        { urls: "stun:stun.relay.metered.ca:80" },
+        { urls: "turn:global.relay.metered.ca:443", username: "u", credential: "c" },
+      ]),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(minted.iceServers).toHaveLength(2);
+    expect(minted.iceServers[1]?.username).toBe("u");
+  });
+
+  it("refuses a configured list that is unusable", async () => {
+    await expect(mintIceServers({ servers: "not json" })).rejects.toThrow(/not valid JSON/);
+    await expect(mintIceServers({ servers: "[]" })).rejects.toThrow(/nothing usable/);
+  });
+
   it("says plainly when no key is configured", async () => {
-    await expect(mintIceServers({ keyId: undefined, token: undefined })).rejects.toBeInstanceOf(TurnUnavailable);
-    await expect(mintIceServers({ keyId: "key-1", token: "" })).rejects.toBeInstanceOf(TurnUnavailable);
+    await expect(mintIceServers({ endpoint: undefined })).rejects.toBeInstanceOf(TurnUnavailable);
+    await expect(mintIceServers({ endpoint: "" })).rejects.toBeInstanceOf(TurnUnavailable);
   });
 
   it("never repeats the provider's answer, which can echo the token", async () => {
     stubProvider({ error: "bad token secret-token" }, 401);
-    await expect(mintIceServers({ keyId: "key-1", token: "secret-token" })).rejects.toThrow(/status 401/);
+    await expect(mintIceServers({ endpoint: "https://provider.example/creds?apiKey=secret-token" })).rejects.toThrow(/status 401/);
     try {
-      await mintIceServers({ keyId: "key-1", token: "secret-token" });
+      await mintIceServers({ endpoint: "https://provider.example/creds?apiKey=secret-token" });
     } catch (err) {
       expect(String(err)).not.toContain("secret-token");
     }
@@ -68,15 +101,14 @@ describe("minting TURN credentials", () => {
 
   it("refuses an answer with nothing usable in it", async () => {
     stubProvider({ iceServers: [] });
-    await expect(mintIceServers({ keyId: "key-1", token: "t" })).rejects.toThrow(/no usable servers/);
+    await expect(mintIceServers({ endpoint: "https://provider.example/creds?apiKey=t" })).rejects.toThrow(/no usable servers/);
   });
 });
 
 describe("who may ask the relay for credentials", () => {
   it("answers a registered device", async () => {
     stubProvider(CLOUDFLARE_REPLY);
-    (env as Record<string, unknown>)["TURN_KEY_ID"] = "key-1";
-    (env as Record<string, unknown>)["TURN_TOKEN"] = "secret-token";
+    (env as Record<string, unknown>)["TURN_ENDPOINT"] = "https://provider.example/creds?apiKey=secret-token";
 
     const device = await createDevice();
     const daemon = await connectRegisteredDevice(device);
@@ -104,8 +136,7 @@ describe("who may ask the relay for credentials", () => {
   });
 
   it("stays usable when TURN is not configured", async () => {
-    delete (env as Record<string, unknown>)["TURN_KEY_ID"];
-    delete (env as Record<string, unknown>)["TURN_TOKEN"];
+    delete (env as Record<string, unknown>)["TURN_ENDPOINT"];
 
     const device = await createDevice();
     const daemon = await connectRegisteredDevice(device);

@@ -50,6 +50,10 @@ type Handlers struct {
 	// OnTURN receives the credentials the relay minted, and how long they
 	// last. The relay holds the key, so no user configures one.
 	OnTURN func(servers []InboundICEServer, expiresIn int)
+	// WantTURN reports whether this device needs TURN credentials at all.
+	// A computer with no paired phone has nobody to connect to, so asking
+	// would spend the relay's TURN quota on a device that cannot use it.
+	WantTURN func() bool
 }
 
 // Config configures a transport Client.
@@ -325,7 +329,7 @@ func (c *Client) runOnce(ctx context.Context, generation uint64) runOutcome {
 	// that registration signature is what entitles it to them. The answer
 	// arrives on the read loop below, and a relay without a TURN key simply
 	// reports that, leaving direct paths and STUN to do the work.
-	if c.cfg.Handlers.OnTURN != nil {
+	if c.cfg.Handlers.OnTURN != nil && (c.cfg.Handlers.WantTURN == nil || c.cfg.Handlers.WantTURN()) {
 		// Best effort: a relay that cannot answer leaves direct paths and
 		// STUN to do the work, which is not a reason to drop the session.
 		_ = conn.writeText(ctx, []byte(`{"type":"turn"}`))

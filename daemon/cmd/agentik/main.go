@@ -355,6 +355,12 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 			OnRegistered: func(_ string, connections []string) {
 				acceptor.HandleRegistered(runCtx, connections)
 			},
+			WantTURN: func() bool {
+				// Only a computer with a confirmed phone can be connected to,
+				// so only it needs a relayed path.
+				n, err := pairSvc.PairedClientCount(runCtx)
+				return err == nil && n > 0
+			},
 			OnTURN: func(servers []transport.InboundICEServer, expiresIn int) {
 				ice := make([]webrtc.ICEServer, 0, len(servers))
 				for _, s := range servers {
