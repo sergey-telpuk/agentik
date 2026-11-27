@@ -7,6 +7,8 @@
  * canonical encoding, these tests fail here rather than the mismatch
  * appearing as an unexplained rejected registration in production.
  *
+ * The same vector is asserted on the Go side by TestRegisterCrossLanguageVector
+ * in daemon/internal/protocol/protocol_test.go; keep the two in step.
  * Regenerate them only together with a deliberate protocol version change.
  */
 

@@ -5,10 +5,101 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"testing"
 	"time"
 )
+
+// registerVector is the cross-language registration vector. The same values
+// are asserted by relay/test/compat.test.ts: the relay verifies signatures the
+// daemon makes, so if either side changes its canonical encoding, both suites
+// fail instead of the mismatch surfacing as a rejected registration.
+//
+// Inputs: Ed25519 seed bytes 0x00..0x1f, challenge bytes 0xa0..0xbf, relay id
+// "agentik-relay-dev", expiry 1700000000. Regenerate only together with a
+// deliberate protocol version change.
+var registerVector = struct {
+	relayID      string
+	expiresAt    int64
+	deviceIDB64  string
+	deviceIDText string
+	publicKeyB64 string
+	challengeB64 string
+	signatureB64 string
+	signingHex   string
+}{
+	relayID:      "agentik-relay-dev",
+	expiresAt:    1_700_000_000,
+	deviceIDB64:  "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw=",
+	deviceIDText: "kzdvvj2umnduyauf35o36k6kw462mujvra46tn3uqgzovmihocga",
+	publicKeyB64: "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+	challengeB64: "oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8=",
+	signatureB64: "ftPYGqoyEmXunSVB2dgYRm8evOIon8LVlqIQ2Fp8hRV4EDmTOeQIkVeiTyLuadAcOgyV5/TH7GRCIIWXdj/2Dg==",
+	signingHex: "000000196167656e74696b2d72656c61792d72656769737465722d7631000100000006646576696365" +
+		"000000116167656e74696b2d72656c61792d6465760000002056475aa75463474c0285df5dbf2bcab7" +
+		"3da651358839e9b77481b2eab107708c0000002003a107bff3ce10be1d70dd18e74bc09967e4d6309ba" +
+		"50d5f1ddc8664125531b800000020a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9ba" +
+		"bbbcbdbebf000000006553f100",
+}
+
+func TestRegisterCrossLanguageVector(t *testing.T) {
+	v := registerVector
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+	challenge := make([]byte, ChallengeSize)
+	for i := range challenge {
+		challenge[i] = byte(0xa0 + i)
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	pub := priv.Public().(ed25519.PublicKey)
+
+	b64 := base64.StdEncoding.EncodeToString
+	if got := b64(pub); got != v.publicKeyB64 {
+		t.Fatalf("public key = %s, want %s", got, v.publicKeyB64)
+	}
+	if got := b64(challenge); got != v.challengeB64 {
+		t.Fatalf("challenge = %s, want %s", got, v.challengeB64)
+	}
+	id := DeviceIDFromKey(pub)
+	if got := b64(id); got != v.deviceIDB64 {
+		t.Fatalf("device id = %s, want %s", got, v.deviceIDB64)
+	}
+	if got := FormatDeviceID(id); got != v.deviceIDText {
+		t.Fatalf("device id text = %s, want %s", got, v.deviceIDText)
+	}
+
+	req := &RegisterRequest{
+		Version:           Version,
+		Role:              RoleDevice,
+		RelayID:           v.relayID,
+		DeviceID:          id,
+		RegisterPublicKey: pub,
+		Challenge:         challenge,
+		ExpiresAt:         time.Unix(v.expiresAt, 0),
+	}
+	msg, err := req.signingBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(msg); got != v.signingHex {
+		t.Fatalf("signing bytes = %s, want %s", got, v.signingHex)
+	}
+	if err := req.Sign(priv); err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	// Ed25519 is deterministic, so the same key and message must give the
+	// exact signature the relay test verifies.
+	if got := b64(req.Signature); got != v.signatureB64 {
+		t.Fatalf("signature = %s, want %s", got, v.signatureB64)
+	}
+	if err := req.Verify(v.relayID, challenge, time.Unix(v.expiresAt-10, 0)); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+}
 
 // TestCanonicalEncodingIsUnambiguous is the core property that makes the
 // encoding safe to sign: two different field sequences must never produce the
