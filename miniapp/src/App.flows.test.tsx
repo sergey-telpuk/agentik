@@ -70,6 +70,23 @@ async function render(scenario: ScenarioName): Promise<void> {
     root.render(<App services={services(scenario)} />);
   });
   await advance(0);
+  // Home is the conversation list now; these flows start from the computers
+  // screen, which it links to once the paired computers have loaded. How long
+  // that takes depends on the scenario, so poll instead of guessing.
+  for (let i = 0; i < 20; i++) {
+    const link = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Pair a computer" || b.getAttribute("aria-label") === "New conversation",
+    );
+    if (link !== undefined) {
+      await act(async () => {
+        link.click();
+      });
+      await advance(10);
+      return;
+    }
+    await advance(50);
+  }
+  throw new Error(`home never offered a way to the computers screen: ${container.textContent}`);
 }
 
 function find(text: string): HTMLButtonElement {
@@ -164,6 +181,9 @@ describe("App flows on mock data", () => {
     expect(dialog()).toBeNull();
     await click("Forget this computer");
     await click("Forget computer", 10);
+    // Forgetting returns home (the conversation list); the remaining computer
+    // is still paired, so reach its row through the new-conversation button.
+    await click("New conversation", 10);
     expect(container.querySelector("li.computer-row")).not.toBeNull();
     expect(container.textContent).not.toContain("Home Linux box");
   });
@@ -317,6 +337,9 @@ describe("App flows on mock data", () => {
     expect(container.textContent).toContain("Work MacBook ended access for this phone");
     expect(container.textContent).toContain("not restored automatically");
     await click("Back to computers", 10);
+    // That returns home (the conversation list); the computers screen is one
+    // step further.
+    await click("New conversation", 10);
     // The list row shows no status; opening a revoked computer leads to the access-ended screen.
     expect(container.textContent).not.toContain("access ended");
     await click("Open Work MacBook", 10);
@@ -341,8 +364,8 @@ describe("App flows on mock data", () => {
     await click("Clear data", 10);
     expect(container.textContent).toContain("Local pinned data cleared.");
     await click("Back", 10);
-    expect(heading()).toBe("Computers");
-    expect(container.textContent).toContain("No computers paired yet.");
+    expect(heading()).toBe("Agentik");
+    expect(container.textContent).toContain("No computer paired yet.");
   });
 
   it("shows diagnostics and clears local data after confirmation", async () => {
@@ -357,6 +380,7 @@ describe("App flows on mock data", () => {
     await click("Clear data", 10);
     expect(container.textContent).toContain("Local pinned data cleared.");
     await click("Back", 10);
+    await click("Pair a computer", 10);
     expect(container.textContent).toContain("No computers paired yet.");
   });
 });

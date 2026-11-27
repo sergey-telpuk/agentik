@@ -17,6 +17,7 @@ import {
   type ServerEvent,
   type SessionListResult,
   type SessionOpenParams,
+  type SessionDeleteResult,
   type SessionOpenResult,
   type TaskResult,
   type TaskStartParams,
@@ -157,6 +158,11 @@ export class AgentikRpcClient {
 
   listSessions(projectId?: string, options: { readonly timeoutMs?: number } = {}): Promise<SessionListResult> {
     return this.request("session.list", projectId === undefined ? {} : { project_id: projectId }, options);
+  }
+
+  /** Deletes one conversation on the computer. The removal is permanent. */
+  deleteSession(projectId: string, sessionId: string): Promise<SessionDeleteResult> {
+    return this.request("session.delete", { project_id: projectId, session_id: sessionId });
   }
 
   openSession(params: SessionOpenParams): Promise<SessionOpenResult> {

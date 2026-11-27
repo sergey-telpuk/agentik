@@ -367,10 +367,16 @@ export interface AgentikApi {
    * this phone knows from the current run, keyed by session id; nothing is
    * stored on the phone.
    */
-  listConversations(computerId: string, projectId: string): Promise<ApiResult<ConversationListing>>;
+  listConversations(computerId: string, projectId?: string): Promise<ApiResult<ConversationListing>>;
   getTask(computerId: string, taskId: string): Promise<ApiResult<TaskSummary>>;
   /** The turns of one conversation, oldest first. */
   getSession(computerId: string, projectId: string, sessionId: string): Promise<ApiResult<SessionView>>;
+  /**
+   * Deletes one conversation and its messages on the computer. Permanent:
+   * nothing is archived. Refused with `session_busy` while the agent is still
+   * working in it.
+   */
+  deleteSession(computerId: string, projectId: string, sessionId: string): Promise<ApiResult<null>>;
   startTask(computerId: string, input: StartTaskInput): Promise<ApiResult<TaskSummary>>;
   /**
    * Replays events after `afterSeq`, then delivers live ones. Unsubscribing

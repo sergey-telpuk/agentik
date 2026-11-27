@@ -385,6 +385,8 @@ func (s *Service) HandleMessage(ctx context.Context, sess *secure.ManagedSession
 		s.handleSessionList(ctx, sess, req)
 	case "session.open":
 		s.handleSessionOpen(ctx, sess, req)
+	case "session.delete":
+		s.handleSessionDelete(ctx, sess, req)
 	case "task.start":
 		s.handleTaskStart(ctx, sess, client, req)
 	case "task.get":
@@ -558,6 +560,86 @@ func (s *Service) handleAgentList(ctx context.Context, sess *secure.ManagedSessi
 	s.sendResult(ctx, sess, req.RequestID, AgentListResult{Agents: s.catalog.List(ctx)})
 }
 
+// handleSessionDelete removes one conversation and everything recorded for it.
+// The deletion is permanent: there is no archived state to restore from.
+func (s *Service) handleSessionDelete(ctx context.Context, sess *secure.ManagedSession, req InboundRequest) {
+	var params struct {
+		ProjectID string `json:"project_id"`
+		SessionID string `json:"session_id"`
+	}
+	if err := decodeStrictParams(req.Params, &params); err != nil {
+		s.sendError(ctx, sess, req.RequestID, "bad_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(params.SessionID) == "" {
+		s.sendError(ctx, sess, req.RequestID, "bad_request", "session_id must not be empty")
+		return
+	}
+	// The project must be one this client may use, so a session id alone never
+	// reaches a conversation outside the local project catalogue.
+	proj, err := s.projects.Get(params.ProjectID)
+	if err != nil {
+		s.sendError(ctx, sess, req.RequestID, "not_found", err.Error())
+		return
+	}
+
+	tx, err := s.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		s.sendError(ctx, sess, req.RequestID, "internal", "failed to delete the conversation")
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var owner string
+	err = tx.QueryRowContext(ctx, `SELECT project_id FROM agent_sessions WHERE id = ?`, params.SessionID).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && owner != proj.ID) {
+		s.sendError(ctx, sess, req.RequestID, "not_found", "unknown session")
+		return
+	}
+	if err != nil {
+		s.sendError(ctx, sess, req.RequestID, "internal", "failed to delete the conversation")
+		return
+	}
+
+	// A turn still running would keep writing events for rows that are gone,
+	// and its agent process outlives this request.
+	var active int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM tasks
+		 WHERE session_id = ?
+		   AND state IN ('accepted','starting','running','awaiting_approval','cancel_requested')`,
+		params.SessionID,
+	).Scan(&active); err != nil {
+		s.sendError(ctx, sess, req.RequestID, "internal", "failed to delete the conversation")
+		return
+	}
+	if active > 0 {
+		s.sendError(ctx, sess, req.RequestID, "session_busy", "the agent is still working in this conversation; stop it first")
+		return
+	}
+
+	// Children first: every table below references tasks or the session.
+	stmts := []string{
+		`DELETE FROM approvals WHERE session_id = ?`,
+		`DELETE FROM events WHERE session_id = ?`,
+		`DELETE FROM commands WHERE task_id IN (SELECT id FROM tasks WHERE session_id = ?)`,
+		`DELETE FROM tasks WHERE session_id = ?`,
+		`DELETE FROM agent_sessions WHERE id = ?`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.ExecContext(ctx, stmt, params.SessionID); err != nil {
+			s.sendError(ctx, sess, req.RequestID, "internal", "failed to delete the conversation")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		s.sendError(ctx, sess, req.RequestID, "internal", "failed to delete the conversation")
+		return
+	}
+
+	s.sendResult(ctx, sess, req.RequestID, SessionDeleteResult{SessionID: params.SessionID, Deleted: true})
+}
+
 func (s *Service) handleSessionList(ctx context.Context, sess *secure.ManagedSession, req InboundRequest) {
 	var params struct {
 		ProjectID string `json:"project_id"`
@@ -632,6 +714,14 @@ func (s *Service) handleSessionList(ctx context.Context, sess *secure.ManagedSes
 		return
 	}
 	s.sendResult(ctx, sess, req.RequestID, SessionListResult{Sessions: sessions, SessionsTruncated: truncated})
+}
+
+// SessionDeleteResult is the result of session.delete.
+type SessionDeleteResult struct {
+	SessionID string `json:"session_id"`
+	// Deleted is always true: a session that could not be removed is an error,
+	// never a result saying nothing happened.
+	Deleted bool `json:"deleted"`
 }
 
 // SessionListResult is the result of session.list.

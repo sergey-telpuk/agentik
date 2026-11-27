@@ -726,6 +726,23 @@ p {
   font-size: 13px;
 }
 
+/* A command inside an empty state: monospace, scrollable rather than clipped. */
+.empty-code {
+  margin-top: 2px;
+}
+
+.empty-code code {
+  display: block;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--code-bg, rgba(127, 127, 127, 0.12));
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+  overflow-x: auto;
+  white-space: pre;
+}
+
 .skeleton-list {
   display: flex;
   flex-direction: column;
@@ -1403,4 +1420,110 @@ select.model-chip {
   padding: 10px var(--pad);
   padding-bottom: max(12px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--separator);
+}
+
+/* ---------------------------------------------------------------------------
+ * Chats: the home screen. Conversations are the only thing on it, so the rows
+ * carry no card chrome — separators and spacing do the grouping instead.
+ * ------------------------------------------------------------------------ */
+
+.chat-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0 calc(var(--pad) * -1);
+}
+
+.chat-item {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--separator);
+}
+
+.chat-item:last-child {
+  border-bottom: none;
+}
+
+.chat-open {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  padding: 14px var(--pad);
+  background: none;
+  border: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-open:active {
+  background: var(--section-bg);
+}
+
+.chat-title {
+  font-size: 16px;
+  font-weight: 560;
+  line-height: 1.35;
+}
+
+.chat-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--hint);
+}
+
+/* An agent that stopped and cannot continue without the user. */
+.chat-sub-attention {
+  color: var(--warn);
+  font-weight: 560;
+}
+
+.chat-where {
+  color: var(--hint);
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Visible on its own row rather than behind a swipe, so it is reachable
+ * with a keyboard and a screen reader too. */
+.chat-delete {
+  display: flex;
+  align-items: center;
+  padding: 0 var(--pad);
+  background: none;
+  border: none;
+  color: var(--hint);
+  cursor: pointer;
+}
+
+.chat-delete:active {
+  color: var(--bad, var(--warn));
+}
+
+/* The one action of the screen: start a conversation. */
+.fab {
+  position: fixed;
+  right: var(--pad);
+  bottom: calc(var(--pad) + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--fb-on-accent, #fff);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  cursor: pointer;
+}
+
+.fab:active {
+  transform: scale(0.96);
 }

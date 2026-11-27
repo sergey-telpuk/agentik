@@ -167,8 +167,11 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
   }
 
   /** Local tasks of a project with the unfinished ones re-read from the computer. */
-  async function refreshedLocalTasks(computerId: string, projectId: string, rpc: AgentikRpcClient): Promise<KnownTask[]> {
-    const mine = [...tasks.values()].filter((t) => t.computerId === computerId && t.view.project_id === projectId);
+  async function refreshedLocalTasks(computerId: string, projectId: string | undefined, rpc: AgentikRpcClient): Promise<KnownTask[]> {
+    // No project means every conversation this phone knows on that computer.
+    const mine = [...tasks.values()].filter(
+      (t) => t.computerId === computerId && (projectId === undefined || t.view.project_id === projectId),
+    );
     await Promise.all(
       mine
         .filter((t) => !isFinalState(taskSummaryFromView(t.view, 0).state))
@@ -428,6 +431,22 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
           turns: [...turns.values()].sort((a, b) => a.createdAt - b.createdAt),
           truncated: opened.tasks_truncated === true,
         };
+      });
+    },
+
+    async deleteSession(computerId, projectId, sessionId) {
+      return call(computerId, async (rpc): Promise<null> => {
+        await rpc.deleteSession(projectId, sessionId);
+        // Drop what this phone remembers, so the conversation does not come
+        // back from the local list the next time it is merged in.
+        for (const [taskId, known] of tasks) {
+          if (known.computerId === computerId && known.view.session_id === sessionId) {
+            tasks.delete(taskId);
+            lastSeq.delete(taskId);
+          }
+        }
+        computerConversations.get(computerId)?.delete(sessionId);
+        return null;
       });
     },
 

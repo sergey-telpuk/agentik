@@ -666,7 +666,10 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
     async listConversations(computerId, projectId) {
       const record = await session(computerId);
       if (!record.ok) return record;
-      const tasks = [...record.value.tasks.values()].filter((t) => t.projectId === projectId).map((t) => t.summary());
+      // No project means every conversation on this computer.
+      const tasks = [...record.value.tasks.values()]
+        .filter((t) => projectId === undefined || t.projectId === projectId)
+        .map((t) => t.summary());
       const listing: ConversationListing = {
         conversations: mergeConversations([], conversationsFromTasks(tasks)),
         source: "computer",
@@ -691,6 +694,20 @@ export function createMockApi(options: MockApiOptions): AgentikApi {
       if (turns.length === 0) return fail("not_found", "No such conversation on this computer.");
       const view: SessionView = { sessionId, projectId, turns, truncated: false };
       return ok(view);
+    },
+
+    async deleteSession(computerId, projectId, sessionId) {
+      const record = await session(computerId);
+      if (!record.ok) return record;
+      const turns = [...record.value.tasks.entries()].filter(
+        ([, t]) => t.projectId === projectId && t.sessionId === sessionId,
+      );
+      if (turns.length === 0) return fail("not_found", "No such conversation on this computer.");
+      if (turns.some(([, t]) => !isFinalState(t.summary().state))) {
+        return fail("busy", "The agent is still working in this conversation; stop it first.");
+      }
+      for (const [taskId] of turns) record.value.tasks.delete(taskId);
+      return ok(null);
     },
 
     async startTask(computerId, input: StartTaskInput) {

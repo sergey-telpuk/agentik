@@ -5,6 +5,7 @@ import { createDefaultServices, type AppServices } from "./services";
 import type { PinnedDeviceStore } from "./storage/pinnedDevices";
 import { AccessEndedScreen } from "./ui/AccessEndedScreen";
 import { ComputerScreen } from "./ui/ComputerScreen";
+import { ChatsScreen } from "./ui/ChatsScreen";
 import { ComputersScreen } from "./ui/ComputersScreen";
 import { NewTaskScreen } from "./ui/NewTaskScreen";
 import { PairScreen } from "./ui/PairScreen";
@@ -14,6 +15,7 @@ import { SessionScreen } from "./ui/SessionScreen";
 import { TerminalScreen } from "./ui/TerminalScreen";
 
 type Route =
+  | { readonly name: "chats" }
   | { readonly name: "computers" }
   | { readonly name: "pair" }
   | { readonly name: "settings" }
@@ -49,7 +51,7 @@ interface Ready {
   readonly api: AgentikApi;
 }
 
-const HOME: Route = { name: "computers" };
+const HOME: Route = { name: "chats" };
 
 function computerOf(route: Route): Computer | null {
   return "computer" in route ? route.computer : null;
@@ -228,6 +230,25 @@ function Screen({ route, ready, services, connection, listKey, scenarios, push, 
   const { api, store } = ready;
   const now = services.now;
   switch (route.name) {
+    case "chats":
+      return (
+        <ChatsScreen
+          key={listKey}
+          api={api}
+          now={now}
+          onOpen={(computerId, projectId, sessionId) => {
+            void api.listComputers().then((result) => {
+              if (!result.ok) return;
+              const computer = result.value.find((c) => c.id === computerId);
+              if (computer === undefined) return;
+              push({ name: "session", computer, sessionId, projectId, projectName: projectId, initialTurn: null });
+            });
+          }}
+          onNew={() => push({ name: "computers" })}
+          onComputers={() => push({ name: "computers" })}
+          onSettings={() => push({ name: "settings" })}
+        />
+      );
     case "computers":
       return (
         <ComputersScreen

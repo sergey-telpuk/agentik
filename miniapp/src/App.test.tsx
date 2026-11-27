@@ -83,6 +83,7 @@ async function render(s: AppServices): Promise<void> {
   await act(async () => {
     root.render(<App services={s} />);
   });
+  await goToComputers();
 }
 
 function button(label: string): HTMLButtonElement {
@@ -90,6 +91,29 @@ function button(label: string): HTMLButtonElement {
   const found = all.find((b) => b.textContent === label) ?? all.find((b) => b.textContent?.includes(label) === true);
   if (found === undefined) throw new Error(`no button "${label}" in: ${container.textContent}`);
   return found;
+}
+
+/**
+ * Home is the conversation list; these tests work on the computers screen.
+ * The link it offers depends on whether any computer is paired yet, and home
+ * re-renders while it loads, so find and click in the same step.
+ */
+async function goToComputers(): Promise<void> {
+  for (let i = 0; i < 60; i++) {
+    const link = [...container.querySelectorAll("button")].find(
+      (b) => b.getAttribute("aria-label") === "New conversation" || b.textContent === "Pair a computer",
+    );
+    if (link !== undefined) {
+      await act(async () => {
+        link.click();
+      });
+      return;
+    }
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+  }
+  throw new Error(`home never offered a way to the computers screen: ${container.textContent}`);
 }
 
 async function click(label: string): Promise<void> {
@@ -138,6 +162,9 @@ describe("App", () => {
     expect(container.textContent).toContain("not trusted yet");
 
     await click("Pin this computer");
+    // Pinning returns home (the conversation list); the computers screen is
+    // one step further.
+    await goToComputers();
     await settle(() => container.querySelector("li.computer-row") !== null);
     // The list row shows the computer, but no status text.
     expect(container.querySelector("li.computer-row .button-primary")?.textContent).toBe("OPEN");
@@ -274,6 +301,9 @@ describe("App", () => {
     await click("Check invitation");
     await settle(() => has("Pin this computer"));
     await click("Pin this computer");
+    // Pinning returns home (the conversation list); the computers screen is
+    // one step further.
+    await goToComputers();
     await settle(() => container.querySelector("li.computer-row") !== null);
 
     await click("OPEN");

@@ -119,7 +119,14 @@ export function ComputerScreen({ api, computer, connection, onRetry, onForget, o
           )}
           {loaded.kind === "ready" && loaded.projects.length === 0 && (
             <Empty title="No projects are shared with this phone.">
-              <p>Choose the permitted projects in Agentik on the computer.</p>
+              <p>
+                The computer decides which folders an agent may use, so projects are listed when the daemon starts.
+                Restart it with one <code>-project</code> for each folder:
+              </p>
+              <p className="empty-code">
+                <code>agentik -project my-app=/Users/you/Projects/my-app</code>
+              </p>
+              <p>Pairing survives the restart, so you do not scan the code again.</p>
             </Empty>
           )}
           {loaded.kind === "ready" && loaded.projects.length > 0 && (
