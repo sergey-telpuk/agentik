@@ -22,17 +22,44 @@ import (
 	"github.com/sergey-telpuk/agentik/daemon/internal/terminal"
 )
 
-// quietTerminal runs zsh without the user's startup files and with a fixed prompt.
+// testShell is a POSIX shell that exists on this machine. The default is
+// /bin/zsh, which macOS has and a Linux CI runner does not.
+func testShell(t *testing.T) string {
+	t.Helper()
+	for _, candidate := range []string{"/bin/zsh", "/bin/bash", "/bin/sh"} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	t.Skip("no POSIX shell available")
+	return ""
+}
+
+// quietTerminal runs a shell without the user's startup files and with a fixed
+// prompt. Each supported shell reads a different startup file, so write the
+// ones that matter and point the shell at this temporary home.
 func quietTerminal(t *testing.T, idle time.Duration) func(*runtime.Config) {
 	t.Helper()
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, ".zshrc"), []byte("PROMPT='$ '\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A login bash reads .bash_profile, not .bashrc, and root's default prompt
+	// ends in # rather than $. Bracketed paste would also wrap the output.
+	profile := "PS1='$ '\nunset PROMPT_COMMAND\nbind 'set enable-bracketed-paste off' 2>/dev/null\n"
+	if err := os.WriteFile(filepath.Join(home, ".bash_profile"), []byte(profile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shell := testShell(t)
 	return func(cfg *runtime.Config) {
 		cfg.Terminal = terminal.Config{
-			Shell:       "/bin/zsh",
-			Env:         []string{"HOME=" + home, "ZDOTDIR=" + home, "PATH=/usr/bin:/bin:/usr/sbin:/sbin"},
+			Shell: shell,
+			Env: []string{
+				"HOME=" + home,
+				"ZDOTDIR=" + home,
+				"PS1=$ ",
+				"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+			},
 			IdleTimeout: idle,
 			Logf:        t.Logf,
 		}

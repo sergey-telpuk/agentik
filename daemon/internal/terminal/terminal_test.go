@@ -19,6 +19,12 @@ func quietEnv(t *testing.T) []string {
 	if err := os.WriteFile(filepath.Join(home, ".zshrc"), []byte("PROMPT='$ '\nunsetopt BEEP\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A login bash reads .bash_profile, not .bashrc, and root's default prompt
+	// ends in # rather than $. Bracketed paste would also wrap the output.
+	profile := "PS1='$ '\nunset PROMPT_COMMAND\nbind 'set enable-bracketed-paste off' 2>/dev/null\n"
+	if err := os.WriteFile(filepath.Join(home, ".bash_profile"), []byte(profile), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return []string{
 		"HOME=" + home,
 		"ZDOTDIR=" + home,
@@ -27,9 +33,22 @@ func quietEnv(t *testing.T) []string {
 	}
 }
 
+// testShell is a POSIX shell that exists on this machine. The default is
+// /bin/zsh, which macOS has and a Linux CI runner does not.
+func testShell(t *testing.T) string {
+	t.Helper()
+	for _, candidate := range []string{"/bin/zsh", "/bin/bash", "/bin/sh"} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	t.Skip("no POSIX shell available")
+	return ""
+}
+
 func newTestManager(t *testing.T, idle time.Duration) *Manager {
 	t.Helper()
-	m := NewManager(Config{Shell: "/bin/zsh", Env: quietEnv(t), IdleTimeout: idle, Logf: t.Logf})
+	m := NewManager(Config{Shell: testShell(t), Env: quietEnv(t), IdleTimeout: idle, Logf: t.Logf})
 	t.Cleanup(func() { m.CloseAll(ReasonShutdown) })
 	return m
 }

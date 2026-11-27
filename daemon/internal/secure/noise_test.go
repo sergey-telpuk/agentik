@@ -75,16 +75,16 @@ func configs(t *testing.T, prologue []byte) (Config, Config, *ecdh.PrivateKey, *
 	t.Helper()
 	phone, device := newStatic(t), newStatic(t)
 	return Config{
-			Initiator:  true,
-			StaticKey:  phone,
-			Prologue:   prologue,
-			VerifyPeer: acceptAll,
-		}, Config{
-			Initiator:  false,
-			StaticKey:  device,
-			Prologue:   prologue,
-			VerifyPeer: acceptAll,
-		}, phone, device
+		Initiator:  true,
+		StaticKey:  phone,
+		Prologue:   prologue,
+		VerifyPeer: acceptAll,
+	}, Config{
+		Initiator:  false,
+		StaticKey:  device,
+		Prologue:   prologue,
+		VerifyPeer: acceptAll,
+	}, phone, device
 }
 
 func TestHandshakeExchangesMessages(t *testing.T) {
