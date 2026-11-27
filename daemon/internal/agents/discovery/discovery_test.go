@@ -184,3 +184,46 @@ func TestVersionIsFirstLineAndBounded(t *testing.T) {
 		t.Fatalf("version not bounded to first line: %+v", a)
 	}
 }
+
+func TestExecutableNames(t *testing.T) {
+	if got := executableNames("darwin", "codex"); len(got) != 1 || got[0] != "codex" {
+		t.Errorf("darwin: %v", got)
+	}
+	got := executableNames("windows", "codex")
+	if len(got) != 2 || got[0] != "codex.exe" || got[1] != "codex.cmd" {
+		t.Errorf("windows bare name: %v", got)
+	}
+	for _, n := range []string{"codex.exe", "codex.CMD", "codex.bat"} {
+		if got := executableNames("windows", n); len(got) != 1 || got[0] != n {
+			t.Errorf("windows %s: %v", n, got)
+		}
+	}
+}
+
+func TestWellKnownDirsWindows(t *testing.T) {
+	home := filepath.Join("C:", "Users", "me")
+	got := wellKnownDirsFor("windows", home, filepath.Join(home, "AppData", "Roaming"), "")
+	want := []string{
+		filepath.Join(home, "AppData", "Roaming", "npm"),
+		filepath.Join(home, "AppData", "Local", "Programs"),
+	}
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			if g == w {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("missing %q in %v", w, got)
+		}
+	}
+	for _, g := range wellKnownDirsFor("windows", home, "", "") {
+		if g == "/usr/local/bin" || g == "/opt/homebrew/bin" {
+			t.Errorf("Unix directory %q listed for windows", g)
+		}
+	}
+	if got := wellKnownDirsFor("darwin", home, "", ""); got[0] != "/opt/homebrew/bin" {
+		t.Errorf("darwin list changed: %v", got)
+	}
+}

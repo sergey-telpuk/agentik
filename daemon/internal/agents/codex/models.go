@@ -69,7 +69,7 @@ func (a *AppServerAdapter) listModels(ctx context.Context) ([]Model, error) {
 	}
 	defer func() {
 		_ = stdin.Close()
-		_ = cmd.Process.Kill()
+		killProcessTree(cmd.Process)
 		_ = cmd.Wait()
 	}()
 

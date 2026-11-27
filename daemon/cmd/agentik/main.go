@@ -43,6 +43,10 @@ const (
 )
 
 func main() {
+	prepareConsole()
+	// os.Interrupt is Ctrl+C on every platform. On Windows the Go runtime also
+	// reports console close, logoff and shutdown as syscall.SIGTERM, so the
+	// same list shuts the daemon down cleanly there.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

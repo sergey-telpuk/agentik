@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -91,6 +92,9 @@ func TestRunVersion(t *testing.T) {
 }
 
 func TestRunStatusListsDetectedAgents(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("shell-script fake binaries need a POSIX shell")
+	}
 	bin := t.TempDir()
 	write := func(name, body string) {
 		t.Helper()
