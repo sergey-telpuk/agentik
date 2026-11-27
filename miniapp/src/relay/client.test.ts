@@ -5,6 +5,8 @@ import {
   DEFAULT_BACKOFF,
   DEFAULT_MAX_FRAME_BYTES,
   FrameTooLargeError,
+  KEEPALIVE_PING,
+  RELAY_CLOSE_CODES,
   RelayClient,
   RelayNotConnectedError,
   type BackoffOptions,
@@ -427,3 +429,55 @@ describe("RelayClient: frames", () => {
     expect(seen).toEqual([]);
   });
 });
+
+describe("RelayClient: keepalive and connection epoch", () => {
+  it("sends exact keepalive pings and reconnects when pong times out", () => {
+    const { client, sockets, latest } = setup({
+      keepaliveIntervalMs: 5_000,
+      keepaliveTimeoutMs: 2_000,
+    });
+    client.start();
+    latest().open();
+    latest().attach();
+
+    vi.advanceTimersByTime(5_000);
+    expect(latest().sent.at(-1)).toEqual(JSON.parse(KEEPALIVE_PING));
+
+    latest().receive({ type: "pong" });
+    vi.advanceTimersByTime(2_000);
+    expect(client.getStatus().state).toBe("connected");
+
+    // Second ping goes unanswered past keepaliveTimeoutMs -> reconnects.
+    vi.advanceTimersByTime(3_000);
+    expect(latest().sent.at(-1)).toEqual(JSON.parse(KEEPALIVE_PING));
+    vi.advanceTimersByTime(2_000);
+    expect(sockets[0]?.closed).toBe(true);
+    expect(client.getStatus().state).toBe("reconnecting");
+    vi.advanceTimersByTime(1000);
+    expect(sockets).toHaveLength(2);
+  });
+
+  it("increments peerEpoch when device attaches or re-registers and captures close codes", () => {
+    const { client, latest } = setup();
+    client.start();
+    latest().open();
+    latest().attach(true);
+    expect(client.getStatus()).toMatchObject({
+      connectionId: "c1",
+      peerEpoch: 1,
+      devicePresent: true,
+    });
+
+    // Daemon replaces its socket on the relay -> relay pushes peer_state present: true again.
+    latest().receive({ type: "peer_state", present: true });
+    expect(client.getStatus().peerEpoch).toBe(2);
+
+    latest().onclose?.({ code: RELAY_CLOSE_CODES.evicted, reason: "evicted" });
+    expect(client.getStatus()).toMatchObject({
+      state: "reconnecting",
+      connectionId: null,
+      lastCloseCode: RELAY_CLOSE_CODES.evicted,
+    });
+  });
+});
+

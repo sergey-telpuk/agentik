@@ -17,6 +17,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@richardhopton/noise-c.wasm": "0.5.0",
     "@telegram-apps/sdk": "3.11.8",
     "react": "19.3.1",
     "react-dom": "19.3.1"

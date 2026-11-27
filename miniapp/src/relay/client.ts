@@ -1,11 +1,12 @@
 /**
- * The relay connection: the ONLY module that knows the relay wire format.
+ * The relay connection: the ONLY module that knows the relay wire format
+ * (`relay/src/messages.ts`, `relay/src/limits.ts`).
  *
- * It opens a WebSocket to the relay, attaches to one computer, reconnects with
- * exponential backoff, and exposes opaque encrypted frames through
- * `FrameTransport`. It never interprets frame contents: confidentiality and
- * authentication come from the Noise session layered on top (see
- * `src/secure/seam.ts`), which is not implemented yet.
+ * It opens a WebSocket to `/v1/connect?device=<base32>`, attaches to one
+ * computer, maintains keepalive pings, reconnects with exponential backoff,
+ * and exposes opaque encrypted frames through `FrameTransport`. It never
+ * interprets frame contents: confidentiality and authentication come from the
+ * Noise session layered on top (`src/secure/noise.ts`).
  *
  * Reconnecting never resumes anything. A new socket is a new connection, so
  * whoever sits above must run a fresh handshake (AGENTIK.md section 6.1).
@@ -15,40 +16,55 @@
 import { decodeBase64, encodeBase64 } from "../encoding";
 import type { FrameTransport } from "./frame-transport";
 
-// ---------------------------------------------------------------------------
-// Relay envelope (PROVISIONAL)
-//
-// TODO(envelope): these types and the parsing below are provisional. They
-// mirror `relay/src/messages.ts` as read while the relay was being changed to
-// add a connection ID (AGENTIK.md section 6.2). They MUST be aligned with
-// `relay/src/messages.ts` once the relay fix is committed: field names, the
-// `connection_id`/`connectionId` casing, close codes, and error codes.
-// Nothing outside this file may depend on the wire shape.
-// ---------------------------------------------------------------------------
-
 /** Envelope version sent in `attach`. */
 export const ENVELOPE_VERSION = 1;
 
 /** Path the relay serves WebSocket upgrades on. */
 const CONNECT_PATH = "/v1/connect";
 
+/** Exact JSON keepalive messages answered by the Cloudflare DO runtime. */
+export const KEEPALIVE_PING = '{"type":"ping"}';
+export const KEEPALIVE_PONG = '{"type":"pong"}';
+
+/** WebSocket close codes assigned by `relay/src/messages.ts`. */
+export const RELAY_CLOSE_CODES = {
+  replaced: 4000,
+  protocolError: 4001,
+  slowReceiver: 4002,
+  evicted: 4003,
+} as const;
+
 /** Messages this client sends. */
 type OutboundMessage =
   | { type: "attach"; version: number; device_id: string }
   | { type: "frame"; data: string };
 
-/** Error codes the relay may report. Open-ended: unknown codes are tolerated. */
-export type RelayErrorCode = string;
+/** Known relay error codes from `relay/src/messages.ts`. */
+export type RelayKnownErrorCode =
+  | "bad_request"
+  | "unsupported_version"
+  | "unauthorized"
+  | "expired"
+  | "not_registered"
+  | "peer_unavailable"
+  | "too_many_connections"
+  | "rate_limited"
+  | "message_too_large"
+  | "internal";
+
+/** Error codes the relay may report. Open-ended for forward compatibility. */
+export type RelayErrorCode = RelayKnownErrorCode | (string & {});
 
 /** Error codes after which retrying cannot help, so the client stops. */
-const FATAL_ERROR_CODES: ReadonlySet<RelayErrorCode> = new Set(["bad_request", "unsupported_version"]);
+const FATAL_ERROR_CODES: ReadonlySet<string> = new Set(["bad_request", "unsupported_version"]);
 
 /** Messages this client understands from the relay, after validation. */
 type InboundMessage =
-  | { type: "attached"; devicePresent: boolean; connectionId: string | null }
+  | { type: "attached"; devicePresent: boolean; connectionId: string }
   | { type: "peer_state"; present: boolean }
   | { type: "frame"; data: Uint8Array }
-  | { type: "error"; code: RelayErrorCode };
+  | { type: "error"; code: RelayErrorCode }
+  | { type: "pong" };
 
 /**
  * Validates one relay message. The relay is not a trusted party for message
@@ -68,10 +84,11 @@ function parseInbound(text: string): InboundMessage | null {
     case "attached": {
       if (typeof message["devicePresent"] !== "boolean") return null;
       const id = message["connectionId"];
+      if (typeof id !== "string" || id.length === 0) return null;
       return {
         type: "attached",
         devicePresent: message["devicePresent"],
-        connectionId: typeof id === "string" ? id : null,
+        connectionId: id,
       };
     }
     case "peer_state":
@@ -85,6 +102,8 @@ function parseInbound(text: string): InboundMessage | null {
     }
     case "error":
       return typeof message["code"] === "string" ? { type: "error", code: message["code"] } : null;
+    case "pong":
+      return { type: "pong" };
     default:
       // `challenge` and `registered` are for the computer, not for a phone.
       return null;
@@ -159,10 +178,21 @@ export interface RelayStatus {
   readonly attempt: number;
   /** Whether the computer is online behind the relay. Null until known. */
   readonly devicePresent: boolean | null;
+  /** Relay-assigned connection ID for this WebSocket, or null when unattached. */
+  readonly connectionId: string | null;
+  /**
+   * Incremented each time the device becomes available on the current socket
+   * (either at `attached` with `devicePresent: true` or upon `peer_state`
+   * with `present: true`, including when a daemon re-registers). Consumers use
+   * this to start a fresh Noise handshake.
+   */
+  readonly peerEpoch: number;
   /** Milliseconds until the next retry while `reconnecting`. */
   readonly nextRetryInMs: number | null;
   /** The last relay error code, if any. Never contains frame contents. */
   readonly lastError: string | null;
+  /** The WebSocket close code of the most recent close, if any. */
+  readonly lastCloseCode: number | null;
 }
 
 export interface RelayClientOptions {
@@ -180,15 +210,19 @@ export interface RelayClientOptions {
   readonly handshakeTimeoutMs?: number;
   /** A connection must stay attached this long before the backoff resets. */
   readonly stableAfterMs?: number;
+  /** How often to send `KEEPALIVE_PING` while attached (`0` disables keepalive). */
+  readonly keepaliveIntervalMs?: number;
+  /** How long to wait for `KEEPALIVE_PONG` after sending a ping. */
+  readonly keepaliveTimeoutMs?: number;
   /** Largest frame this client will send. */
   readonly maxFrameBytes?: number;
 }
 
-/**
- * TODO(envelope): provisional. Mirrors `LIMITS.maxFrameBytes` in
- * `relay/src/device-room.ts`; align with the relay once its limits are final.
- */
+/** Matches `LIMITS.maxFrameBytes` in `relay/src/limits.ts`. */
 export const DEFAULT_MAX_FRAME_BYTES = 32 * 1024;
+
+export const DEFAULT_KEEPALIVE_INTERVAL_MS = 20_000;
+export const DEFAULT_KEEPALIVE_TIMEOUT_MS = 10_000;
 
 export class RelayNotConnectedError extends Error {
   constructor() {
@@ -208,8 +242,11 @@ const INITIAL_STATUS: RelayStatus = {
   state: "stopped",
   attempt: 0,
   devicePresent: null,
+  connectionId: null,
+  peerEpoch: 0,
   nextRetryInMs: null,
   lastError: null,
+  lastCloseCode: null,
 };
 
 export class RelayClient implements FrameTransport {
@@ -227,6 +264,8 @@ export class RelayClient implements FrameTransport {
   #retryTimer: ReturnType<typeof setTimeout> | null = null;
   #handshakeTimer: ReturnType<typeof setTimeout> | null = null;
   #stableTimer: ReturnType<typeof setTimeout> | null = null;
+  #keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
+  #keepaliveTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   #running = false;
 
   constructor(options: RelayClientOptions) {
@@ -239,6 +278,8 @@ export class RelayClient implements FrameTransport {
       random: options.random ?? Math.random,
       handshakeTimeoutMs: options.handshakeTimeoutMs ?? 10_000,
       stableAfterMs: options.stableAfterMs ?? 10_000,
+      keepaliveIntervalMs: options.keepaliveIntervalMs ?? DEFAULT_KEEPALIVE_INTERVAL_MS,
+      keepaliveTimeoutMs: options.keepaliveTimeoutMs ?? DEFAULT_KEEPALIVE_TIMEOUT_MS,
       maxFrameBytes: options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
     };
   }
@@ -272,7 +313,13 @@ export class RelayClient implements FrameTransport {
     this.#clearTimers();
     this.#discardSocket();
     this.#attached = false;
-    this.#setStatus({ ...this.#status, state: "stopped", nextRetryInMs: null });
+    this.#setStatus({
+      ...this.#status,
+      state: "stopped",
+      connectionId: null,
+      devicePresent: null,
+      nextRetryInMs: null,
+    });
   }
 
   /**
@@ -303,7 +350,7 @@ export class RelayClient implements FrameTransport {
     try {
       socket = this.#options.createSocket(this.#url());
     } catch {
-      this.#scheduleReconnect();
+      this.#scheduleReconnect(null);
       return;
     }
     this.#socket = socket;
@@ -313,7 +360,7 @@ export class RelayClient implements FrameTransport {
       // Opened or not, the relay did not accept the attach in time.
       if (generation !== this.#generation) return;
       this.#discardSocket();
-      this.#scheduleReconnect();
+      this.#scheduleReconnect(null);
     }, this.#options.handshakeTimeoutMs);
 
     socket.onopen = () => {
@@ -330,9 +377,9 @@ export class RelayClient implements FrameTransport {
       if (generation !== this.#generation) return;
       this.#handleMessage(event.data);
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (generation !== this.#generation) return;
-      this.#scheduleReconnect();
+      this.#scheduleReconnect(typeof event?.code === "number" ? event.code : null);
     };
     // An error is always followed by a close event, which does the work.
     socket.onerror = () => undefined;
@@ -344,7 +391,7 @@ export class RelayClient implements FrameTransport {
     if (message === null) return;
 
     switch (message.type) {
-      case "attached":
+      case "attached": {
         this.#attached = true;
         this.#clearTimer("handshake");
         this.#clearTimer("stable");
@@ -352,20 +399,36 @@ export class RelayClient implements FrameTransport {
           // Held long enough to count as a healthy connection.
           this.#setStatus({ ...this.#status, attempt: 0 });
         }, this.#options.stableAfterMs);
+        this.#scheduleKeepalive();
+        const nextEpoch = message.devicePresent ? this.#status.peerEpoch + 1 : this.#status.peerEpoch;
         this.#setStatus({
           ...this.#status,
           state: "connected",
           devicePresent: message.devicePresent,
+          connectionId: message.connectionId,
+          peerEpoch: nextEpoch,
           nextRetryInMs: null,
         });
         return;
+      }
       case "peer_state":
-        if (this.#attached) this.#setStatus({ ...this.#status, devicePresent: message.present });
+        if (this.#attached) {
+          const nextEpoch = message.present ? this.#status.peerEpoch + 1 : this.#status.peerEpoch;
+          this.#setStatus({
+            ...this.#status,
+            devicePresent: message.present,
+            peerEpoch: nextEpoch,
+          });
+        }
         return;
       case "frame":
         // Frames are only meaningful from an attached connection.
         if (!this.#attached || message.data.length > this.#options.maxFrameBytes) return;
         for (const handler of this.#frameHandlers) handler(message.data);
+        return;
+      case "pong":
+        this.#clearTimer("keepaliveTimeout");
+        this.#scheduleKeepalive();
         return;
       case "error":
         if (FATAL_ERROR_CODES.has(message.code)) {
@@ -373,7 +436,14 @@ export class RelayClient implements FrameTransport {
           this.#clearTimers();
           this.#discardSocket();
           this.#attached = false;
-          this.#setStatus({ ...this.#status, state: "failed", lastError: message.code, nextRetryInMs: null });
+          this.#setStatus({
+            ...this.#status,
+            state: "failed",
+            connectionId: null,
+            devicePresent: null,
+            lastError: message.code,
+            nextRetryInMs: null,
+          });
         } else {
           this.#setStatus({ ...this.#status, lastError: message.code });
         }
@@ -381,8 +451,33 @@ export class RelayClient implements FrameTransport {
     }
   }
 
+  #scheduleKeepalive(): void {
+    this.#clearTimer("keepalive");
+    const interval = this.#options.keepaliveIntervalMs;
+    if (!this.#running || !this.#attached || interval <= 0) return;
+    const generation = this.#generation;
+    this.#keepaliveTimer = setTimeout(() => {
+      this.#keepaliveTimer = null;
+      if (generation !== this.#generation || !this.#attached || this.#socket === null) return;
+      try {
+        this.#socket.send(KEEPALIVE_PING);
+      } catch {
+        this.#discardSocket();
+        this.#scheduleReconnect(null);
+        return;
+      }
+      this.#clearTimer("keepaliveTimeout");
+      this.#keepaliveTimeoutTimer = setTimeout(() => {
+        this.#keepaliveTimeoutTimer = null;
+        if (generation !== this.#generation) return;
+        this.#discardSocket();
+        this.#scheduleReconnect(null);
+      }, this.#options.keepaliveTimeoutMs);
+    }, interval);
+  }
+
   /** Called when the connection ended without the caller asking for it. */
-  #scheduleReconnect(): void {
+  #scheduleReconnect(closeCode: number | null): void {
     this.#clearTimers();
     this.#socket = null;
     this.#attached = false;
@@ -395,7 +490,9 @@ export class RelayClient implements FrameTransport {
       state: "reconnecting",
       attempt: attempt + 1,
       devicePresent: null,
+      connectionId: null,
       nextRetryInMs: delay,
+      lastCloseCode: closeCode ?? this.#status.lastCloseCode,
     });
     this.#retryTimer = setTimeout(() => {
       this.#retryTimer = null;
@@ -423,19 +520,35 @@ export class RelayClient implements FrameTransport {
     }
   }
 
-  #clearTimer(which: "retry" | "handshake" | "stable"): void {
-    if (which === "retry" && this.#retryTimer !== null) clearTimeout(this.#retryTimer);
-    if (which === "handshake" && this.#handshakeTimer !== null) clearTimeout(this.#handshakeTimer);
-    if (which === "stable" && this.#stableTimer !== null) clearTimeout(this.#stableTimer);
-    if (which === "retry") this.#retryTimer = null;
-    if (which === "handshake") this.#handshakeTimer = null;
-    if (which === "stable") this.#stableTimer = null;
+  #clearTimer(which: "retry" | "handshake" | "stable" | "keepalive" | "keepaliveTimeout"): void {
+    if (which === "retry" && this.#retryTimer !== null) {
+      clearTimeout(this.#retryTimer);
+      this.#retryTimer = null;
+    }
+    if (which === "handshake" && this.#handshakeTimer !== null) {
+      clearTimeout(this.#handshakeTimer);
+      this.#handshakeTimer = null;
+    }
+    if (which === "stable" && this.#stableTimer !== null) {
+      clearTimeout(this.#stableTimer);
+      this.#stableTimer = null;
+    }
+    if (which === "keepalive" && this.#keepaliveTimer !== null) {
+      clearTimeout(this.#keepaliveTimer);
+      this.#keepaliveTimer = null;
+    }
+    if (which === "keepaliveTimeout" && this.#keepaliveTimeoutTimer !== null) {
+      clearTimeout(this.#keepaliveTimeoutTimer);
+      this.#keepaliveTimeoutTimer = null;
+    }
   }
 
   #clearTimers(): void {
     this.#clearTimer("retry");
     this.#clearTimer("handshake");
     this.#clearTimer("stable");
+    this.#clearTimer("keepalive");
+    this.#clearTimer("keepaliveTimeout");
   }
 
   #setStatus(status: RelayStatus): void {

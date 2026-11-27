@@ -1,19 +1,11 @@
 /**
- * The seam where the Noise session will plug in.
+ * Interfaces for the authenticated, encrypted Noise session layered over
+ * `FrameTransport`.
  *
- * Noise is NOT implemented in the Mini App yet (AGENTIK.md section 6.1). The
- * relay client moves opaque frames; a `SecureChannelFactory` turns that frame
- * transport plus a pinned daemon key into an authenticated session that can
- * carry inner messages. Everything that must be confidential (initData, agent
- * commands) is expressed against `SecureSession`, never against the raw relay
- * client, so it cannot be sent in clear by mistake.
- *
- * TODO(noise): implement `SecureChannelFactory` with
- * `Noise_XX_25519_ChaChaPoly_SHA256`, the prologue defined by
- * `NoisePrologue` in `daemon/internal/protocol/device.go`, and a vetted
- * library whose WebView compatibility has been tested (AGENTIK.md section
- * 14). The phone must check the daemon's static key against the pinned key
- * after the second XX message and refuse the session on any mismatch.
+ * Everything confidential (`initData`, pairing submission, agent commands,
+ * task events, approvals) is expressed against `SecureSession`, never against
+ * `FrameTransport` directly, so application code cannot accidentally emit
+ * plaintext to the relay.
  */
 
 import type { FrameTransport } from "../relay/frame-transport";
@@ -23,8 +15,14 @@ export interface SecureChannelParams {
   readonly transport: FrameTransport;
   /** The 32-byte device identifier the relay routes by. */
   readonly deviceId: Uint8Array;
-  /** The pinned X25519 key of the daemon. A different key must abort. */
+  /** The pinned X25519 static public key of the daemon. A mismatch aborts. */
   readonly pinnedNoisePublicKey: Uint8Array;
+  /** This phone's long-term X25519 static private key (32 bytes). */
+  readonly clientStaticPrivateKey: Uint8Array;
+  /** Maximum milliseconds to wait for handshake completion. */
+  readonly handshakeTimeoutMs?: number;
+  /** Optional abort signal to cancel an in-flight handshake. */
+  readonly signal?: AbortSignal;
 }
 
 /** An authenticated, encrypted session. Created only after a full handshake. */
@@ -33,6 +31,8 @@ export interface SecureSession {
   send(plaintext: Uint8Array): void;
   /** Subscribes to decrypted inner messages. Returns an unsubscribe function. */
   onMessage(handler: (plaintext: Uint8Array) => void): () => void;
+  /** Subscribes to decryption or session errors after handshake completion. */
+  onError?(handler: (error: Error) => void): () => void;
   close(): void;
 }
 
@@ -40,18 +40,3 @@ export interface SecureChannelFactory {
   /** Resolves only after the handshake completed and the daemon key matched the pin. */
   open(params: SecureChannelParams): Promise<SecureSession>;
 }
-
-/** Raised by the placeholder factory so a missing implementation is loud. */
-export class NoiseNotImplementedError extends Error {
-  constructor() {
-    super("The Noise secure channel is not implemented yet");
-    this.name = "NoiseNotImplementedError";
-  }
-}
-
-/** Placeholder used until the Noise module exists. It always refuses. */
-export const unimplementedSecureChannel: SecureChannelFactory = {
-  open(): Promise<SecureSession> {
-    return Promise.reject(new NoiseNotImplementedError());
-  },
-};

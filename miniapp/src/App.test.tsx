@@ -3,8 +3,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { App } from "./App";
 import { asJson, NOW_MS, validWire } from "./pairing/testing";
+import { noiseChannelFactory } from "./secure/noise";
 import type { AppServices } from "./services";
 import { MemoryBackend } from "./storage/fakes";
+import { PhoneIdentityStore } from "./storage/phoneIdentity";
 import { PinnedDeviceStore } from "./storage/pinnedDevices";
 import { noTelegramRuntime } from "./telegram/runtime";
 
@@ -28,9 +30,11 @@ function services(backend: MemoryBackend | null): AppServices {
   return {
     runtime: noTelegramRuntime,
     openStore: () => PinnedDeviceStore.open({ secure: backend, device: null }),
+    openIdentityStore: () => PhoneIdentityStore.open({ secure: backend, device: null }),
     createRelayClient: () => {
       throw new Error("not used in this test");
     },
+    secureChannel: noiseChannelFactory,
     now: () => NOW_MS,
   };
 }
