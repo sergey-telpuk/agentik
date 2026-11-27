@@ -32,6 +32,11 @@ export default tseslint.config(
     },
   },
   {
+    // Build-time Node scripts.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: { globals: globals.node },
+  },
+  {
     // Tests inspect web storage to prove it is never written to.
     files: ["src/**/*.test.{ts,tsx}"],
     rules: { "no-restricted-globals": "off", "no-restricted-properties": "off" },

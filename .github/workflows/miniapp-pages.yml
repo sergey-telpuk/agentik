@@ -1,0 +1,56 @@
+# Builds miniapp/ and deploys it to GitHub Pages.
+# One-time setup: Settings > Pages > Build and deployment > Source: GitHub Actions.
+# Manual run without pushing to main: Actions > this workflow > Run workflow
+# (the Pages environment may restrict which branches may deploy).
+name: Mini App to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: miniapp
+    env:
+      # Repository variable MINIAPP_BASE overrides the default /<repo>/
+      # (use "/" for a custom domain or a <owner>.github.io user site).
+      VITE_BASE: ${{ vars.MINIAPP_BASE || format('/{0}/', github.event.repository.name) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: miniapp/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: miniapp/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -4,11 +4,20 @@ import { defineConfig } from "vitest/config";
 
 const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as { version: string };
 
+/**
+ * Public base path. `/` serves from a domain root; a GitHub Pages project
+ * page needs `/<repo>/`. Set VITE_BASE at build time; a missing leading or
+ * trailing slash is added so `agentik` and `/agentik` both work.
+ */
+export function normalizeBase(raw: string | undefined): string {
+  const value = (raw ?? "").trim();
+  if (value === "" || value === "/") return "/";
+  return `/${value.replace(/^\/+|\/+$/g, "")}/`;
+}
+
 export default defineConfig({
   plugins: [react()],
-  // Relative asset paths: the Mini App is served from a path chosen at
-  // deployment time, not necessarily the domain root.
-  base: "./",
+  base: normalizeBase(process.env.VITE_BASE),
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
