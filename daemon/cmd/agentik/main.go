@@ -238,6 +238,10 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	if err != nil {
 		return err
 	}
+	turnProvider, err := rtcFlags.turnProvider()
+	if err != nil {
+		return err
+	}
 
 	// One mutex for both streams keeps lines whole when they share a terminal.
 	var outMu sync.Mutex
@@ -275,6 +279,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		DeviceID:       id.DeviceID(),
 		Signaler:       signaler,
 		ICE:            iceCfg,
+		TURNProvider:   turnProvider,
 		ConnectTimeout: *rtcFlags.connectTimeout,
 		OnEvent: func(connID, event string) {
 			logLine("webrtc[%s]: %s", connID, event)

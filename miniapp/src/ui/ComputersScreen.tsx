@@ -44,39 +44,47 @@ function GetStarted() {
       </Section>
       <Section title="How it works">
         <ol className="steps">
-          <li>Download the file for your Mac and check the checksum.</li>
+          <li>Download the file for your computer and check the checksum.</li>
           <li>
-            In Terminal on your Mac, run the daemon with <code>-pair</code>.
+            In a terminal on that computer, run the daemon with <code>-pair</code>.
           </li>
           <li>Paste the invitation or scan the QR code here.</li>
-          <li>Confirm the pairing with “y” in Terminal on your Mac.</li>
+          <li>Confirm the pairing with “y” in that terminal.</li>
         </ol>
       </Section>
       <Section title="How secure it is">
         <ul className="bullets">
           <li>
-            Pairing needs a one-time invitation and your confirmation on your Mac. A phone that was never paired cannot
-            connect.
+            Pairing needs a one-time invitation and your confirmation on the computer. A phone that was never paired
+            cannot connect.
           </li>
           <li>
-            Messages between your phone and your Mac are encrypted end to end (Noise protocol) and go over a direct
+            Messages between your phone and the computer are encrypted end to end (Noise protocol) and go over a direct
             WebRTC connection. The relay only helps the two find each other and never carries your messages.
           </li>
           <li>
-            The daemon runs no server: it connects outwards to the relay. A phone that was never paired fails the
-            encrypted handshake.
+            This phone pins the computer&rsquo;s key when you pair. The handshake also binds both ends of the
+            connection, so an attacker who rewrites the signalling fails it before any message is sent.
+          </li>
+          <li>The daemon runs no server: it connects outwards to the relay and accepts no incoming connections.</li>
+          <li>
+            The relay sees no message contents, but it does see metadata: network addresses, timing and message sizes.
+            A TURN operator, if one is used, sees the same about encrypted traffic.
           </li>
           <li>
-            Some networks block direct connections. Your phone then cannot reach your Mac unless you run your own TURN
-            server.
+            Some networks block direct connections. Your phone then cannot reach the computer unless a TURN server is
+            configured, either your own or a provider.
+          </li>
+          <li>
+            Agents are not local models: Codex and similar tools send your code and prompts to their own provider.
           </li>
           <li>
             The files are built from the public source by GitHub Actions. Check the SHA256 checksum before you run a
             file.
           </li>
           <li>
-            The files are not signed by Apple yet. macOS may ask you to confirm the first run if you download in a
-            browser.
+            The files are not signed yet. Your operating system may ask you to confirm the first run if you download in
+            a browser.
           </li>
         </ul>
       </Section>

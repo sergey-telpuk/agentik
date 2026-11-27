@@ -55,6 +55,10 @@ type Config struct {
 	DeviceID []byte
 	Signaler Signaler
 	ICE      ICEConfig
+	// TURNProvider mints TURN credentials through a provider's API instead of
+	// from a shared secret. Nil keeps the coturn derivation in ICE. When it
+	// fails, the configured STUN servers are sent on their own.
+	TURNProvider TURNProvider
 	// ConnectTimeout is how long a phone has to open its DataChannel; zero
 	// means DefaultConnectTimeout.
 	ConnectTimeout time.Duration
@@ -225,8 +229,28 @@ func (a *Acceptor) HandlePeerState(ctx context.Context, connectionID string, pre
 	a.sendICEServers(ctx, p)
 }
 
+// TURNProvider supplies ICE servers with ready-made credentials.
+type TURNProvider interface {
+	Servers(ctx context.Context) ([]ICEServer, error)
+}
+
+// iceServers is the list to hand to a phone: the provider's when one is
+// configured and answers, otherwise the locally derived list.
+func (a *Acceptor) iceServers(ctx context.Context, p *peer) []ICEServer {
+	if a.cfg.TURNProvider == nil {
+		return a.cfg.ICE.Servers("agentik")
+	}
+	fetched, err := a.cfg.TURNProvider.Servers(ctx)
+	if err != nil {
+		// A TURN outage must not take the direct path down with it.
+		a.event(p.id, "TURN provider unavailable, sending STUN only: %v", err)
+		return (ICEConfig{STUNURLs: a.cfg.ICE.STUNURLs}).Servers("")
+	}
+	return fetched
+}
+
 func (a *Acceptor) sendICEServers(ctx context.Context, p *peer) {
-	servers := a.cfg.ICE.Servers("agentik")
+	servers := a.iceServers(ctx, p)
 	if !a.allowCredentialIssue() {
 		// Over the ration: hand out STUN only, no credentials.
 		servers = (ICEConfig{STUNURLs: a.cfg.ICE.STUNURLs}).Servers("")

@@ -20,6 +20,9 @@ const (
 	envTURNSecretFile = "AGENTIK_TURN_SECRET_FILE"
 	envTURNSecret     = "AGENTIK_TURN_SECRET"
 	envTURNTTL        = "AGENTIK_TURN_TTL"
+	envTURNKeyID      = "AGENTIK_TURN_KEY_ID"
+	envTURNTokenFile  = "AGENTIK_TURN_TOKEN_FILE"
+	envTURNToken      = "AGENTIK_TURN_TOKEN"
 	envConnectTimeout = "AGENTIK_CONNECT_TIMEOUT"
 )
 
@@ -58,6 +61,8 @@ type webrtcFlags struct {
 	stun           listFlag
 	turn           listFlag
 	turnSecretFile *string
+	turnKeyID      *string
+	turnTokenFile  *string
 	turnTTL        *time.Duration
 	connectTimeout *time.Duration
 }
@@ -72,6 +77,10 @@ func registerWebRTCFlags(fs *flag.FlagSet) *webrtcFlags {
 		"(repeatable or comma-separated; env "+envTURNURLs+"); needs a TURN secret")
 	f.turnSecretFile = fs.String("turn-secret-file", envOr(envTURNSecretFile, ""),
 		"file holding the TURN shared secret (coturn static-auth-secret); env "+envTURNSecretFile+" or "+envTURNSecret)
+	f.turnKeyID = fs.String("turn-key-id", envOr(envTURNKeyID, ""),
+		"Cloudflare Realtime TURN key id; with --turn-token-file this replaces --turn and the shared secret (env "+envTURNKeyID+")")
+	f.turnTokenFile = fs.String("turn-token-file", envOr(envTURNTokenFile, ""),
+		"file holding the Cloudflare TURN API token; env "+envTURNTokenFile+" or "+envTURNToken)
 	f.turnTTL = fs.Duration("turn-ttl", envDuration(envTURNTTL, webrtc.DefaultTURNTTL),
 		"lifetime of time-limited TURN credentials; env "+envTURNTTL)
 	f.connectTimeout = fs.Duration("connect-timeout", envDuration(envConnectTimeout, webrtc.DefaultConnectTimeout),
@@ -105,4 +114,30 @@ func (f *webrtcFlags) iceConfig() (webrtc.ICEConfig, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// turnProvider builds the Cloudflare Realtime TURN provider when one is
+// configured. The API token is read from a file or the environment, never
+// from a command-line value, so it does not appear in the process list.
+func (f *webrtcFlags) turnProvider() (webrtc.TURNProvider, error) {
+	keyID := strings.TrimSpace(*f.turnKeyID)
+	var token string
+	switch {
+	case *f.turnTokenFile != "":
+		raw, err := os.ReadFile(*f.turnTokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("read TURN token file: %w", err)
+		}
+		token = strings.TrimSpace(string(raw))
+	case os.Getenv(envTURNToken) != "":
+		token = strings.TrimSpace(os.Getenv(envTURNToken))
+	}
+	if keyID == "" && token == "" {
+		return nil, nil
+	}
+	provider := &webrtc.CloudflareTURN{KeyID: keyID, Token: token, TTL: *f.turnTTL}
+	if err := provider.Validate(); err != nil {
+		return nil, err
+	}
+	return provider, nil
 }

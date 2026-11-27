@@ -26,20 +26,20 @@ The product is built from scratch. Using libraries, standard protocols, and offi
 | Local state | SQLite; keys in the OS secure store where one is available |
 | Remote transport | WebRTC `RTCDataChannel` (reliable, ordered) between the Mini App and the local application. All application data uses it and nothing else |
 | Cloud component | A single relay on Cloudflare Workers and Durable Objects, used for signaling only: SDP offer and answer, ICE candidates, the ICE server list, device registration and presence. It never carries application data |
-| NAT traversal | STUN and TURN servers are configured by URL on the computer. TURN is optional, but a network pair with no direct path cannot connect without one. The user runs it (for example coturn on their own VPS); no provider is built in |
+| NAT traversal | STUN and TURN servers are configured on the computer. TURN is optional, but a network pair with no direct path cannot connect without one. Either the user runs their own (for example coturn on a VPS), or they point the daemon at Cloudflare Realtime TURN with a key id and an API token |
 | Fallback | None. If the DataChannel cannot open, the connection fails with a stated reason. The relay never forwards application data |
 | End-to-end encryption | Noise over the DataChannel, with both DTLS fingerprints bound into the Noise prologue |
 | First agent | Codex installed and authorized on the PC, over App Server via stdio |
 | Distribution | GitHub Releases; the Mini App offers only builds actually published |
 | Development | Documentation and subsequent implementation in `main`, no force push |
 
-The computer side uses Pion WebRTC; the Mini App uses the WebView's `RTCPeerConnection`. MQTT, Nostr, and a separate push provider are not used in this version. Cloudflare TURN is not used.
+The computer side uses Pion WebRTC; the Mini App uses the WebView's `RTCPeerConnection`. MQTT, Nostr, and a separate push provider are not used in this version.
 
 This reverses the earlier decision to pass all remote traffic through the relay. The chosen trade-off is that the relay carries only small signaling messages and the data path is direct (or through the user's own TURN), at the price that a pair of networks with no direct path and no TURN server cannot connect at all. The user accepts that; there is no relay data fallback.
 
 ### 1.2. Limits of the promise
 
-- A shared signaling relay exists; the user does not deploy their own signaling server. A TURN server is optional and, if wanted, is the user's own.
+- A shared signaling relay exists; the user does not deploy their own signaling server. A TURN server is optional: it is either the user's own or a provider they configure, and its operator sees addresses, timing, and sizes of encrypted traffic.
 - Without a direct network path between the phone and the computer, and without a working TURN server, the connection fails. There is no relay fallback.
 - The phone stores its own access key and the list of paired computers. The displayed data is also held in the Mini App's memory.
 - The relay provider sees signaling metadata: the network addresses in ICE candidates, timing, and signal sizes. It sees no application data, which never crosses it.
@@ -301,7 +301,11 @@ Method names and the JSON Schema are fixed before clients are implemented. An un
 
 The daemon limits concurrent peers, drops a peer whose DataChannel has not opened within a connect timeout, and drops one that stops draining its queue.
 
-**TURN credentials.** TURN uses coturn's `use-auth-secret` scheme: the username is `<expiry unix seconds>:<label>` and the password is `base64(HMAC-SHA1(secret, username))`. The shared secret stays on the computer; only derived, time-limited credentials are sent to the phone. Because the `ice_servers` signal is sent to whoever attaches to the relay for that device identifier, anyone who knows a device identifier can obtain short-lived TURN credentials. This is mitigated, not prevented: credentials expire quickly (10 minutes by default), the computer issues credentialed lists at most 30 times per minute and falls back to STUN only beyond that, and the TURN server must set its own per-user quotas. A TURN operator who sees the credentials can relay encrypted traffic only; it cannot read or forge it.
+**TURN credentials.** Two schemes are supported, and in both the long-lived secret stays on the computer: only derived, time-limited credentials reach the phone.
+
+With Cloudflare Realtime TURN the daemon posts to `rtc.live.cloudflare.com` with its key id and API token and forwards the returned `iceServers`. The list is cached until shortly before it expires, and a failure falls back to STUN rather than taking the direct path down. The API token is read from a file or the environment, never from a command-line value. URLs on port 53 are dropped: browsers block it.
+
+With a self-run server TURN uses coturn's `use-auth-secret` scheme: the username is `<expiry unix seconds>:<label>` and the password is `base64(HMAC-SHA1(secret, username))`. The shared secret stays on the computer; only derived, time-limited credentials are sent to the phone. Because the `ice_servers` signal is sent to whoever attaches to the relay for that device identifier, anyone who knows a device identifier can obtain short-lived TURN credentials. This is mitigated, not prevented: credentials expire quickly (10 minutes by default), the computer issues credentialed lists at most 30 times per minute and falls back to STUN only beyond that, and the TURN server must set its own per-user quotas. A TURN operator who sees the credentials can relay encrypted traffic only; it cannot read or forge it.
 
 **Fingerprint binding.** Each side reads the DTLS certificate fingerprint declared in the SDP it sent and the one it received (SHA-256 only; an SDP with several different fingerprints, or none, is refused). The Noise prologue is the canonical encoding of the context `agentik-noise-webrtc-prologue-v1`, the version, the roles `client` and `device`, the `device_id`, the phone's fingerprint, and the computer's fingerprint, in that order. DTLS alone authenticates only the fingerprint it was told, and the signaling path is not trusted: a relay or network attacker who rewrites both SDPs can terminate DTLS toward each side with its own certificate. The phone's and the computer's views of the two fingerprints then differ, so the prologues differ and the Noise handshake fails at the second message, before any application byte or phone identity is sent. The pinned computer key then binds the Noise static key to the right computer. The prologue encoding is pinned by a cross-language test vector (Go and TypeScript).
 
@@ -316,6 +320,7 @@ The daemon limits concurrent peers, drops a peer whose DataChannel has not opene
 | Computer | `--relay` (env `AGENTIK_RELAY_URL`): the signaling URL carried in invitations |
 | Computer | `--stun` (env `AGENTIK_STUN_URLS`), `--turn` (env `AGENTIK_TURN_URLS`): repeatable or comma-separated URLs |
 | Computer | `--turn-secret-file` (env `AGENTIK_TURN_SECRET_FILE` or `AGENTIK_TURN_SECRET`): the coturn shared secret; required with `--turn`, never a command-line value |
+| Computer | `--turn-key-id` (env `AGENTIK_TURN_KEY_ID`) and `--turn-token-file` (env `AGENTIK_TURN_TOKEN_FILE` or `AGENTIK_TURN_TOKEN`): Cloudflare Realtime TURN instead of a self-run server |
 | Computer | `--turn-ttl` (env `AGENTIK_TURN_TTL`), `--connect-timeout` (env `AGENTIK_CONNECT_TIMEOUT`) |
 | Mini App build | `VITE_AGENTIK_STUN_URLS`: extra static STUN URLs; `VITE_AGENTIK_CONNECT_TIMEOUT_MS`, `VITE_AGENTIK_ICE_SERVERS_WAIT_MS`. TURN is not configured here: the computer supplies credentials |
 

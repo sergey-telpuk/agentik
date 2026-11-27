@@ -127,19 +127,22 @@ describe("ComputersScreen empty state", () => {
     expect(titles).toEqual(["What to download", "How it works", "How secure it is"]);
     const steps = [...(block()?.querySelectorAll("ol.steps li") ?? [])].map((li) => li.textContent);
     expect(steps).toEqual([
-      "Download the file for your Mac and check the checksum.",
-      "In Terminal on your Mac, run the daemon with -pair.",
+      "Download the file for your computer and check the checksum.",
+      "In a terminal on that computer, run the daemon with -pair.",
       "Paste the invitation or scan the QR code here.",
-      "Confirm the pairing with “y” in Terminal on your Mac.",
+      "Confirm the pairing with “y” in that terminal.",
     ]);
-    expect(block()?.querySelectorAll("ul.bullets li")).toHaveLength(6);
+    expect(block()?.querySelectorAll("ul.bullets li")).toHaveLength(9);
     const text = block()?.textContent ?? "";
     expect(text).toContain("end to end (Noise protocol)");
     expect(text).toContain("direct WebRTC connection");
     expect(text).toContain("never carries your messages");
     expect(text).toContain("runs no server");
-    expect(text).toContain("your own TURN server");
-    expect(text).toContain("not signed by Apple yet");
+    expect(text).toContain("unless a TURN server is configured");
+    expect(text).toContain("not signed yet");
+    // The limits matter as much as the guarantees.
+    expect(text).toContain("network addresses, timing and message sizes");
+    expect(text).toContain("send your code and prompts to their own provider");
   });
 
   it("links to the files under BASE_URL", async () => {
