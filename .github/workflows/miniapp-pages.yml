@@ -1,4 +1,4 @@
-# Builds miniapp/ and the macOS daemon binaries and deploys them to GitHub Pages
+# Builds miniapp/ and the macOS and Windows daemon binaries and deploys them to GitHub Pages
 # as one site: the Mini App at the root, the daemon under downloads/
 # (https://<owner>.github.io/<repo>/downloads/).
 # One-time setup: Settings > Pages > Build and deployment > Source: GitHub Actions.
@@ -46,9 +46,9 @@ jobs:
       - name: Test
         working-directory: daemon
         run: go test -race ./...
-      - name: Build macOS binaries
+      - name: Build macOS and Windows binaries
         # modernc.org/sqlite is pure Go, so CGO is not needed and the Darwin
-        # binaries cross-compile on Linux.
+        # and Windows binaries cross-compile on Linux.
         run: |
           set -euo pipefail
           if tag="$(git describe --tags --exact-match HEAD 2>/dev/null)"; then
@@ -64,11 +64,15 @@ jobs:
               go build -trimpath -ldflags "-s -w -X main.version=$version" \
               -o "$out/agentik-darwin-$arch" ./cmd/agentik)
           done
+          # Windows binary (pure Go, so it cross-compiles on Linux too).
+          (cd daemon && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOTOOLCHAIN=go1.27.4 \
+            go build -trimpath -ldflags "-s -w -X main.version=$version" \
+            -o "$out/agentik-windows-amd64.exe" ./cmd/agentik)
           cp .github/downloads/README.txt "$out/README.txt"
           # index.html makes /downloads/ resolve instead of falling through to the
           # Mini App's 404.html fallback.
           sed "s/@VERSION@/$version/g" .github/downloads/index.html > "$out/index.html"
-          (cd "$out" && sha256sum agentik-darwin-arm64 agentik-darwin-amd64 > SHA256SUMS && cat SHA256SUMS)
+          (cd "$out" && sha256sum agentik-darwin-arm64 agentik-darwin-amd64 agentik-windows-amd64.exe > SHA256SUMS && cat SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:
           name: daemon-downloads
