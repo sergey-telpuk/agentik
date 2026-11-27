@@ -1,9 +1,12 @@
 /**
  * The outer relay envelope.
  *
- * The relay sees only these fields. Local paths, project names, prompts, and
- * results travel inside the Noise ciphertext and are opaque here: the relay
- * routes frames, it does not read them.
+ * The relay carries WebRTC signaling only: SDP offers and answers, ICE
+ * candidates, and the ICE server list. It never carries application data.
+ * Pairing, Noise handshakes, and every RPC frame travel over the WebRTC
+ * DataChannel between the phone and the computer. The relay forwards the
+ * signaling payloads as opaque bytes: it checks the kind and the size and
+ * does not parse SDP.
  *
  * Every message is validated before use. A field that is absent, the wrong
  * type, or the wrong size is a protocol error, never a default.
@@ -24,14 +27,14 @@ import {
 export type ClientMessage =
   | { type: "register"; payload: RegisterPayload }
   | { type: "attach"; payload: AttachPayload }
-  | { type: "frame"; payload: FramePayload };
+  | { type: "signal"; payload: SignalPayload };
 
 /**
  * Messages the relay sends to a peer.
  *
  * `connectionId` names one attached client. The relay assigns it on attach;
- * the device sees it on every frame and presence change for that client, so
- * it can run one Noise session per client and address replies to exactly
+ * the device sees it on every signal and presence change for that client, so
+ * it can run one WebRTC session per client and address replies to exactly
  * one of them. Clients never see another client's identifier.
  */
 export type ServerMessage =
@@ -46,10 +49,10 @@ export type ServerMessage =
    */
   | { type: "peer_state"; present: boolean; connectionId?: string }
   /**
-   * Opaque ciphertext. To the device it carries the sending client's
+   * Opaque signaling payload. To the device it carries the sending client's
    * `connectionId`; to a client it has none.
    */
-  | { type: "frame"; data: string; connectionId?: string }
+  | { type: "signal"; kind: SignalKind; data: string; connectionId?: string }
   /** `connectionId` is set when the error concerns one client connection. */
   | { type: "error"; code: ErrorCode; message: string; connectionId?: string }
   /** Keepalive reply, sent by the runtime; see KEEPALIVE_PING. */
@@ -57,7 +60,7 @@ export type ServerMessage =
 
 /**
  * Error codes are a closed set so a client can branch on them. The human
- * message is for diagnostics and must never carry frame contents.
+ * message is for diagnostics and must never carry signaling contents.
  */
 export type ErrorCode =
   | "bad_request"
@@ -88,8 +91,8 @@ export interface RegisterPayload {
  *
  * Attaching carries no proof of authority on purpose: the relay cannot
  * authenticate a phone, because it never holds Noise keys. A client that
- * attaches can exchange frames with the device, and the device rejects it
- * during the Noise handshake unless it is a paired peer. The envelope
+ * attaches can exchange signals with the device, and the device rejects it
+ * during the Noise handshake (which runs over the DataChannel) unless it is a paired peer. The envelope
  * determines routing, not authority.
  */
 export interface AttachPayload {
@@ -98,13 +101,27 @@ export interface AttachPayload {
 }
 
 /**
- * One opaque ciphertext frame to forward to the peer.
+ * Kinds of signaling payload. The phone is always the offerer and the
+ * computer always answers, so each direction accepts a fixed subset:
+ * a client may send `offer` and `ice`; a device may send `answer`, `ice`,
+ * and `ice_servers` (the STUN/TURN list, possibly with short-lived
+ * credentials, sent to a client before it creates its offer).
+ */
+export type SignalKind = "offer" | "answer" | "ice" | "ice_servers";
+
+export const SIGNAL_KINDS: readonly SignalKind[] = ["offer", "answer", "ice", "ice_servers"];
+export const CLIENT_SIGNAL_KINDS: readonly SignalKind[] = ["offer", "ice"];
+export const DEVICE_SIGNAL_KINDS: readonly SignalKind[] = ["answer", "ice", "ice_servers"];
+
+/**
+ * One opaque signaling payload to forward to the peer.
  *
- * A device must name the client connection the frame is for. A client must
- * not name one: the relay tags its frames with the identifier it assigned,
+ * A device must name the client connection the payload is for. A client must
+ * not name one: the relay tags its payloads with the identifier it assigned,
  * so a client cannot speak as another client.
  */
-export interface FramePayload {
+export interface SignalPayload {
+  kind: SignalKind;
   data: Uint8Array;
   connectionId?: string;
 }
@@ -184,13 +201,13 @@ function base64Length(byteLength: number): number {
 /**
  * Longest raw message accepted, in UTF-16 code units.
  *
- * The largest legitimate message is a frame at the payload limit: its base64
+ * The largest legitimate message is a signal at the payload limit: its base64
  * data plus a connection id and the JSON keys. 512 units of headroom covers
  * that envelope and is far below what would make parsing expensive. Every
  * valid message is ASCII, so this also bounds its UTF-8 byte length.
  */
-export function maxMessageLength(maxFrameBytes: number): number {
-  return base64Length(maxFrameBytes) + 512;
+export function maxMessageLength(maxSignalBytes: number): number {
+  return base64Length(maxSignalBytes) + 512;
 }
 
 /**
@@ -202,9 +219,9 @@ export function maxMessageLength(maxFrameBytes: number): number {
  */
 export function parseClientMessage(
   raw: string,
-  maxFrameBytes: number,
+  maxSignalBytes: number,
 ): ParseResult<ClientMessage> {
-  if (raw.length > maxMessageLength(maxFrameBytes)) {
+  if (raw.length > maxMessageLength(maxSignalBytes)) {
     return fail("message_too_large", "message exceeds the size limit");
   }
 
@@ -224,8 +241,8 @@ export function parseClientMessage(
       return parseRegister(message);
     case "attach":
       return parseAttach(message);
-    case "frame":
-      return parseFrame(message, maxFrameBytes);
+    case "signal":
+      return parseSignal(message, maxSignalBytes);
     default:
       return fail("bad_request", "unknown message type");
   }
@@ -310,40 +327,46 @@ function parseAttach(message: Record<string, unknown>): ParseResult<ClientMessag
   return { ok: true, value: { type: "attach", payload: { version, deviceId } } };
 }
 
-function parseFrame(
+function parseSignal(
   message: Record<string, unknown>,
-  maxFrameBytes: number,
+  maxSignalBytes: number,
 ): ParseResult<ClientMessage> {
+  const kind = readString(message, "kind");
+  if (kind === null || !(SIGNAL_KINDS as readonly string[]).includes(kind)) {
+    return fail("bad_request", "kind must be offer, answer, ice, or ice_servers");
+  }
   const dataText = readString(message, "data");
   if (dataText === null) {
     return fail("bad_request", "data is required");
   }
   // The raw message was already bounded before parsing. This tighter check
-  // on the encoded field rejects an oversized frame without decoding it:
-  // base64 text longer than the encoding of maxFrameBytes cannot decode to
+  // on the encoded field rejects an oversized payload without decoding it:
+  // base64 text longer than the encoding of maxSignalBytes cannot decode to
   // a payload within the limit.
-  if (dataText.length > base64Length(maxFrameBytes)) {
-    return fail("message_too_large", "frame exceeds the size limit");
+  if (dataText.length > base64Length(maxSignalBytes)) {
+    return fail("message_too_large", "signal exceeds the size limit");
   }
   const data = decodeBase64(dataText);
   if (data === null) {
     return fail("bad_request", "data must be base64");
   }
-  if (data.length > maxFrameBytes) {
-    return fail("message_too_large", "frame exceeds the size limit");
+  if (data.length > maxSignalBytes) {
+    return fail("message_too_large", "signal exceeds the size limit");
   }
   if (data.length === 0) {
-    return fail("bad_request", "frame is empty");
+    return fail("bad_request", "signal is empty");
   }
 
+  const payload: SignalPayload = { kind: kind as SignalKind, data };
   const connectionIdRaw = message["connection_id"];
   if (connectionIdRaw === undefined) {
-    return { ok: true, value: { type: "frame", payload: { data } } };
+    return { ok: true, value: { type: "signal", payload } };
   }
   if (typeof connectionIdRaw !== "string" || !CONNECTION_ID_PATTERN.test(connectionIdRaw)) {
     return fail("bad_request", "connection_id must be 32 lowercase hex characters");
   }
-  return { ok: true, value: { type: "frame", payload: { data, connectionId: connectionIdRaw } } };
+  payload.connectionId = connectionIdRaw;
+  return { ok: true, value: { type: "signal", payload } };
 }
 
 /** Converts a parsed registration into the structure the verifier re-encodes. */
@@ -366,11 +389,15 @@ export function serializeServerMessage(message: ServerMessage): string {
 }
 
 /**
- * Builds a frame message carrying opaque ciphertext, tagged with the sending
+ * Builds a signal message carrying an opaque payload, tagged with the sending
  * client's connection when it is addressed to the device.
  */
-export function frameMessage(data: Uint8Array, connectionId?: string): ServerMessage {
-  const message: ServerMessage = { type: "frame", data: encodeBase64(data) };
+export function signalMessage(
+  kind: SignalKind,
+  data: Uint8Array,
+  connectionId?: string,
+): ServerMessage {
+  const message: ServerMessage = { type: "signal", kind, data: encodeBase64(data) };
   if (connectionId !== undefined) message.connectionId = connectionId;
   return message;
 }

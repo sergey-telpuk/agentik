@@ -12,7 +12,7 @@ import (
 )
 
 // Hub wires a pairing.Service, runtime.Service, and secure.Manager together
-// over a transport frame sender, enforcing peer admission, session tracking,
+// over a DataChannel frame sender, enforcing peer admission, session tracking,
 // and live event broadcasting strictly to paired, non-revoked clients.
 type Hub struct {
 	identity *identity.Identity
@@ -22,6 +22,9 @@ type Hub struct {
 
 	mu       sync.Mutex
 	sessions map[string]*secure.ManagedSession
+	// onClosed runs when a connection's Noise session ends (for example on
+	// revocation), so the transport can close its DataChannel too.
+	onClosed func(connectionID string)
 }
 
 // NewHub creates a secure.Manager + Hub binding Noise sessions to pairing and
@@ -31,6 +34,7 @@ func NewHub(
 	pairSvc *pairing.Service,
 	rtCfg Config,
 	sender secure.FrameSender,
+	prologue func(connectionID string) ([]byte, error),
 	onSecureError func(connectionID string, err error),
 ) (*Hub, error) {
 	if id == nil {
@@ -41,6 +45,9 @@ func NewHub(
 	}
 	if sender == nil {
 		return nil, errors.New("runtime: frame sender is required")
+	}
+	if prologue == nil {
+		return nil, errors.New("runtime: noise prologue provider is required")
 	}
 
 	h := &Hub{
@@ -62,6 +69,7 @@ func NewHub(
 		DeviceID:  id.DeviceID(),
 		StaticKey: id.NoisePrivateKey(),
 		Sender:    sender,
+		Prologue:  prologue,
 		VerifyPeer: func(ctx context.Context, _ string, clientStatic []byte) error {
 			_, verifyErr := pairSvc.VerifyTrustedClient(ctx, clientStatic)
 			if verifyErr == nil {
@@ -89,7 +97,12 @@ func NewHub(
 		OnSessionClosed: func(connectionID string) {
 			h.mu.Lock()
 			delete(h.sessions, connectionID)
+			onClosed := h.onClosed
 			h.mu.Unlock()
+			rt.CloseTerminalsForConnection(connectionID)
+			if onClosed != nil {
+				onClosed(connectionID)
+			}
 		},
 		OnMessage: func(ctx context.Context, sess *secure.ManagedSession, plaintext []byte) {
 			rt.HandleMessage(ctx, sess, plaintext)
@@ -104,8 +117,17 @@ func NewHub(
 	return h, nil
 }
 
-// Manager returns the underlying secure.Manager to wire into transport.Client callbacks.
+// Manager returns the underlying secure.Manager, which the WebRTC acceptor
+// drives with DataChannel frames.
 func (h *Hub) Manager() *secure.Manager { return h.manager }
+
+// SetOnSessionClosed registers a callback for the end of a connection's Noise
+// session, so the transport can drop that connection's DataChannel.
+func (h *Hub) SetOnSessionClosed(fn func(connectionID string)) {
+	h.mu.Lock()
+	h.onClosed = fn
+	h.mu.Unlock()
+}
 
 // Runtime returns the local task runtime.
 func (h *Hub) Runtime() *Service { return h.runtime }
@@ -146,6 +168,7 @@ func (h *Hub) RevokePeer(ctx context.Context, peerStatic []byte) error {
 	if err := h.pairing.RevokeByKey(ctx, peerStatic); err != nil {
 		return err
 	}
+	h.runtime.CloseTerminalsForPeer(peerStatic)
 	h.manager.RevokePeer(peerStatic)
 	return nil
 }

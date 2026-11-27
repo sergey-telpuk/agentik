@@ -75,18 +75,31 @@ func (s *Store) path() string { return filepath.Join(s.dir, "identity.json") }
 //
 // A single stable location is used so that history and keys do not end up in
 // a process working directory that changes between launches.
+//
+//	macOS:   ~/Library/Application Support/Agentik
+//	Windows: %AppData%\Agentik
+//	other:   $XDG_CONFIG_HOME/agentik (usually ~/.config/agentik)
 func DefaultDir() (string, error) {
-	if runtime.GOOS == "darwin" {
-		home, err := os.UserHomeDir()
+	return defaultDirFor(runtime.GOOS, os.UserHomeDir, os.UserConfigDir)
+}
+
+// defaultDirFor computes DefaultDir for goos. The macOS path must stay exactly
+// as it is: existing installations keep their data there.
+func defaultDirFor(goos string, userHomeDir, userConfigDir func() (string, error)) (string, error) {
+	if goos == "darwin" {
+		home, err := userHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("identity: locate home directory: %w", err)
 		}
 		return filepath.Join(home, "Library", "Application Support", "Agentik"), nil
 	}
-	// On Linux this honours XDG_CONFIG_HOME; on Windows it is %AppData%.
-	base, err := os.UserConfigDir()
+	// On Windows UserConfigDir is %AppData%; on Linux it honours XDG_CONFIG_HOME.
+	base, err := userConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("identity: locate config directory: %w", err)
+	}
+	if goos == "windows" {
+		return filepath.Join(base, "Agentik"), nil
 	}
 	return filepath.Join(base, "agentik"), nil
 }
@@ -118,6 +131,11 @@ func (s *Store) Load() (*Identity, error) {
 }
 
 // Save writes the identity's private material with owner-only permissions.
+//
+// On Windows the 0600 and 0700 modes are not enforced: Go maps them only to
+// the read-only attribute, so the file is protected by the access control list
+// it inherits from the per-user %AppData% directory (accessible to the owner,
+// administrators and SYSTEM), not by anything this package sets.
 //
 // The write is atomic: the material goes to a temporary file in the same
 // directory and is renamed into place, so an interrupted write cannot leave a

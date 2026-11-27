@@ -2,6 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  Agent,
   AgentikApi,
   ApiResult,
   StartTaskInput,
@@ -59,6 +60,17 @@ function result(taskId: string, state: TaskState, output: string, diff: string |
   };
 }
 
+const CODEX: Agent = {
+  id: "codex",
+  name: "Codex",
+  status: "available",
+  version: "1",
+  models: [
+    { id: "big", name: "Big", description: null, isDefault: true },
+    { id: "small", name: "Small", description: null, isDefault: false },
+  ],
+};
+
 interface Harness {
   readonly api: AgentikApi;
   readonly started: StartTaskInput[];
@@ -66,13 +78,14 @@ interface Harness {
   readonly streams: Map<string, (update: TaskUpdate) => void>;
 }
 
-function harness(turns: TaskSummary[], results: Record<string, TaskResult>): Harness {
+function harness(turns: TaskSummary[], results: Record<string, TaskResult>, agents: Agent[] = [{ ...CODEX, models: [] }]): Harness {
   const started: StartTaskInput[] = [];
   const streams = new Map<string, (update: TaskUpdate) => void>();
   let counter = 0;
   const ok = <T,>(value: T): Promise<ApiResult<T>> => Promise.resolve({ ok: true, value });
   const api = {
     backend: "mock",
+    listAgents: () => ok(agents),
     getSession: () => ok({ sessionId: "ses-1", projectId: "proj-1", turns, truncated: false }),
     getResult: (_computer: string, taskId: string) => {
       const found = results[taskId];
@@ -144,6 +157,23 @@ function sendButton(): HTMLButtonElement {
   return found;
 }
 
+function chip(): HTMLSelectElement | null {
+  return container.querySelector<HTMLSelectElement>("select.model-chip");
+}
+
+function chipLabel(): string | undefined {
+  return chip()?.selectedOptions[0]?.textContent ?? undefined;
+}
+
+async function pick(model: string): Promise<void> {
+  await act(async () => {
+    const el = chip();
+    if (el === null) throw new Error("no model chip");
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set?.call(el, model);
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
 async function send(): Promise<void> {
   await act(async () => {
     sendButton().click();
@@ -167,11 +197,8 @@ describe("SessionScreen", () => {
 
     expect(container.querySelectorAll(".bubble-user")).toHaveLength(2);
     expect(container.querySelectorAll(".bubble-agent")).toHaveLength(2);
-    // Each reply carries its own status chip.
-    expect([...container.querySelectorAll(".bubble-agent .chip-label")].map((c) => c.textContent)).toEqual([
-      "succeeded",
-      "succeeded",
-    ]);
+    // A reply that succeeded carries no status chip; the chip is for turns that run or ended otherwise.
+    expect(container.querySelectorAll(".bubble-agent .chip")).toHaveLength(0);
     // Only the reply with a diff lists changed files; both replies can be copied.
     expect(container.querySelectorAll(".bubble-changes")).toHaveLength(1);
     expect(container.querySelector(".bubble-changes")?.textContent).toContain("src/a.ts");
@@ -272,5 +299,88 @@ describe("SessionScreen", () => {
     await act(async () => approve?.click());
     await flush();
     expect(spy).toHaveBeenCalledWith("comp-1", { taskId: "t1", approvalId: "apr-1", decision: "approve" });
+  });
+  describe("model chip", () => {
+    const bothModels = [CODEX];
+
+    it("shows no chip when the agent offers no model choice, and sends no model", async () => {
+      const h = harness([turn("t1", "q", "succeeded", 0)], { t1: result("t1", "succeeded", "a") });
+      await render(h);
+      expect(chip()).toBeNull();
+      await typeMessage("next");
+      await send();
+      expect(h.started[0]).not.toHaveProperty("model");
+    });
+
+    it("shows the agent default when the conversation has no model yet, and sends none", async () => {
+      const h = harness([turn("t1", "q", "succeeded", 0)], { t1: result("t1", "succeeded", "a") }, bothModels);
+      await render(h);
+      expect(chipLabel()).toBe("Big");
+      await typeMessage("next");
+      await send();
+      expect(h.started).toHaveLength(1);
+      expect(h.started[0]).not.toHaveProperty("model");
+    });
+
+    it("shows the model of the last turn and keeps using it", async () => {
+      const turns = [{ ...turn("t1", "q", "succeeded", 0), model: "big" }, { ...turn("t2", "q2", "succeeded", 5), model: "small" }];
+      const h = harness(turns, { t1: result("t1", "succeeded", "a"), t2: result("t2", "succeeded", "b") }, bothModels);
+      await render(h);
+      expect(chipLabel()).toBe("Small");
+      await typeMessage("next");
+      await send();
+      expect(h.started[0]).toMatchObject({ sessionId: "ses-1", model: "small" });
+    });
+
+    it("sends the model picked in the chip with each follow-up, and the chip then shows it", async () => {
+      const h = harness([turn("t1", "q", "succeeded", 0)], { t1: result("t1", "succeeded", "a") }, bothModels);
+      await render(h);
+      await pick("small");
+      expect(chipLabel()).toBe("Small");
+      await typeMessage("first follow-up");
+      await send();
+      expect(h.started[0]).toMatchObject({ prompt: "first follow-up", model: "small" });
+
+      // The next message uses the same pick until it is changed again.
+      await typeMessage("second follow-up");
+      await send();
+      expect(h.started[1]).toMatchObject({ prompt: "second follow-up", model: "small" });
+
+      // Going back to the default sends it explicitly, so the thread switches back.
+      await pick("big");
+      await typeMessage("third follow-up");
+      await send();
+      expect(h.started[2]).toMatchObject({ prompt: "third follow-up", model: "big" });
+    });
+
+    it("ignores a model of the last turn that the agent no longer offers", async () => {
+      const turns = [{ ...turn("t1", "q", "succeeded", 0), model: "retired" }];
+      const h = harness(turns, { t1: result("t1", "succeeded", "a") }, bothModels);
+      await render(h);
+      expect(chipLabel()).toBe("Big");
+      await typeMessage("next");
+      await send();
+      expect(h.started[0]).not.toHaveProperty("model");
+    });
+
+    it("is disabled together with Send while a turn is running", async () => {
+      const h = harness([{ ...turn("t1", "long job", "running", 0), model: "small" }], {}, bothModels);
+      await render(h);
+      expect(chip()?.disabled).toBe(true);
+      expect(chipLabel()).toBe("Small");
+      await typeMessage("next");
+      expect(sendButton().disabled).toBe(true);
+
+      const push = h.streams.get("t1");
+      (h.api as unknown as { getResult: unknown }).getResult = () =>
+        Promise.resolve({ ok: true, value: result("t1", "succeeded", "done") });
+      await act(async () => {
+        push?.({ task: { ...turn("t1", "long job", "succeeded", 0), model: "small" }, events: [] });
+      });
+      await flush();
+      await flush();
+      expect(chip()?.disabled).toBe(false);
+      expect(sendButton().disabled).toBe(false);
+    });
   });
 });

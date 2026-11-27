@@ -11,18 +11,20 @@ import (
 )
 
 // MaxRelayPlaintextSize is the largest plaintext whose ChaChaPoly-sealed
-// ciphertext (plaintext + 16-byte MAC) still fits within the relay's 32 KiB
-// frame limit.
+// ciphertext (plaintext + 16-byte MAC) still fits within the 32 KiB frame
+// limit of the DataChannel. The name predates the move from the relay to
+// WebRTC; the limit is the same.
 const MaxRelayPlaintextSize = MaxMessageSize - 16
 
 var (
 	// ErrSessionClosed is returned when sending on a closed or dropped connection.
 	ErrSessionClosed = errors.New("secure: session closed")
 	// ErrPayloadTooLarge is returned when plaintext exceeds MaxRelayPlaintextSize.
-	ErrPayloadTooLarge = errors.New("secure: payload exceeds relay frame budget")
+	ErrPayloadTooLarge = errors.New("secure: payload exceeds frame budget")
 )
 
-// FrameSender sends opaque encrypted bytes toward one client connection.
+// FrameSender sends opaque encrypted bytes toward one client connection. The
+// production implementation writes them to that client's WebRTC DataChannel.
 type FrameSender interface {
 	SendFrame(ctx context.Context, connectionID string, data []byte) error
 }
@@ -32,6 +34,12 @@ type ManagerConfig struct {
 	DeviceID  []byte
 	StaticKey *ecdh.PrivateKey
 	Sender    FrameSender
+	// Prologue returns the Noise prologue for one connection. It is called
+	// when that connection's responder handshake starts. Production binds
+	// the DTLS fingerprints of both peers into it (WebRTCPrologue); an error,
+	// such as a connection with no known fingerprints, aborts the handshake
+	// before any message is processed.
+	Prologue func(connectionID string) ([]byte, error)
 	// VerifyPeer validates the client's Noise static public key as soon as
 	// message 3 delivers it. Returning a non-nil error aborts the handshake
 	// before any session is created.
@@ -47,7 +55,7 @@ type ManagerConfig struct {
 }
 
 // ManagedSession represents one authenticated Noise session bound to a single
-// relay connection ID.
+// connection ID.
 type ManagedSession struct {
 	ConnectionID string
 	session      *Session
@@ -55,6 +63,10 @@ type ManagedSession struct {
 
 	mu     sync.RWMutex
 	closed bool
+
+	// sendMu keeps encryption and sending in one order: the peer rejects a
+	// frame whose nonce arrives out of order.
+	sendMu sync.Mutex
 }
 
 // PeerStatic returns a copy of the peer's verified Noise static public key.
@@ -63,7 +75,7 @@ func (s *ManagedSession) PeerStatic() []byte {
 }
 
 // Send encrypts plaintext under this connection's Noise session and forwards
-// the ciphertext via the relay transport.
+// the ciphertext over the connection's DataChannel.
 func (s *ManagedSession) Send(ctx context.Context, plaintext []byte) error {
 	s.mu.RLock()
 	closed := s.closed
@@ -74,6 +86,8 @@ func (s *ManagedSession) Send(ctx context.Context, plaintext []byte) error {
 	if len(plaintext) > MaxRelayPlaintextSize {
 		return fmt.Errorf("%w: %d bytes (limit %d)", ErrPayloadTooLarge, len(plaintext), MaxRelayPlaintextSize)
 	}
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
 	ct, err := s.session.Encrypt(plaintext)
 	if err != nil {
 		return err
@@ -95,11 +109,10 @@ type connState struct {
 	frameCtx context.Context
 }
 
-// Manager owns one independent Noise XX responder state machine per attached
-// relay client connection.
+// Manager owns one independent Noise XX responder state machine per client
+// connection.
 type Manager struct {
-	cfg      ManagerConfig
-	prologue []byte
+	cfg ManagerConfig
 
 	mu    sync.Mutex
 	conns map[string]*connState
@@ -119,25 +132,17 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if cfg.VerifyPeer == nil {
 		return nil, errors.New("secure: VerifyPeer is required")
 	}
+	if cfg.Prologue == nil {
+		return nil, errors.New("secure: Prologue is required")
+	}
 	return &Manager{
-		cfg:      cfg,
-		prologue: DevicePrologue(cfg.DeviceID),
-		conns:    make(map[string]*connState),
+		cfg:   cfg,
+		conns: make(map[string]*connState),
 	}, nil
 }
 
-// HandleRegistered resets any stale state from prior relay sockets and
-// initializes fresh responder handshakes for clients already waiting on the
-// relay.
-func (m *Manager) HandleRegistered(ctx context.Context, connections []string) {
-	m.HandleDisconnected()
-	for _, connID := range connections {
-		m.HandlePeerState(ctx, connID, true)
-	}
-}
-
-// HandleDisconnected tears down all active Noise handshakes and sessions when
-// the daemon's relay WebSocket drops. Reconnecting always starts fresh handshakes.
+// HandleDisconnected tears down all active Noise handshakes and sessions.
+// A new connection always starts a fresh handshake.
 func (m *Manager) HandleDisconnected() {
 	m.mu.Lock()
 	old := m.conns
@@ -158,7 +163,8 @@ func (m *Manager) HandleDisconnected() {
 	}
 }
 
-// HandlePeerState starts or tears down the Noise state for one relay client.
+// HandlePeerState starts or tears down the Noise state for one client
+// connection.
 func (m *Manager) HandlePeerState(ctx context.Context, connectionID string, present bool) {
 	if !present {
 		m.CloseConnection(connectionID)
@@ -250,7 +256,7 @@ func (m *Manager) Session(connectionID string) (*ManagedSession, bool) {
 	return entry.session, true
 }
 
-// HandleFrame processes one inbound opaque frame from connectionID, either
+// HandleFrame processes one inbound opaque DataChannel frame from connectionID, either
 // advancing the Noise XX handshake or decrypting an authenticated transport
 // message.
 func (m *Manager) HandleFrame(ctx context.Context, connectionID string, frame []byte) {
@@ -335,10 +341,14 @@ func (m *Manager) stepHandshake(
 }
 
 func (m *Manager) newResponderHandshake(connectionID string) (*HandshakeState, error) {
+	prologue, err := m.cfg.Prologue(connectionID)
+	if err != nil {
+		return nil, fmt.Errorf("secure: prologue for connection: %w", err)
+	}
 	return NewHandshake(Config{
 		Initiator: false,
 		StaticKey: m.cfg.StaticKey,
-		Prologue:  m.prologue,
+		Prologue:  prologue,
 		VerifyPeer: func(peerStatic []byte) error {
 			m.mu.Lock()
 			entry := m.conns[connectionID]

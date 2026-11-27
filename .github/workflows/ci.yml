@@ -1,0 +1,75 @@
+# Build and test every component on pushes and pull requests.
+# The Pages workflow deploys the Mini App; this one gates correctness.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  daemon:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Keep in step with the go directive in daemon/go.mod.
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test -race ./...
+
+  relay:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  miniapp:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: miniapp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: miniapp/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseInvitation } from "../../pairing/invitation";
-import { NOW_MS, validWire } from "../../pairing/testing";
+import { asText, NOW_MS, validWire } from "../../pairing/testing";
 import { MemoryBackend } from "../../storage/fakes";
 import { PinnedDeviceStore } from "../../storage/pinnedDevices";
 import { noTelegramRuntime } from "../../telegram/runtime";
@@ -103,7 +103,7 @@ describe("computers", () => {
 
   it("pins an invitation as pending confirmation and forgets it", async () => {
     const { api, backend } = await setup("empty");
-    const parsed = parseInvitation(JSON.stringify(validWire()), NOW_MS);
+    const parsed = await parseInvitation(asText(validWire()), NOW_MS);
     if (!parsed.ok) throw new Error("fixture invitation is invalid");
     const computer = value(await api.pairComputer(parsed.value));
     expect(computer.status).toBe("pending_confirmation");
@@ -238,6 +238,32 @@ describe("tasks", () => {
       ok: false,
       error: { code: "conflict" },
     });
+  });
+
+  it("continues a conversation with a chosen model, validates it, and reports the model of each turn", async () => {
+    const { api } = await setup("happy");
+    await connect(api, MAIN);
+    const first = value(await start(api, "proj_billing", "Look at the invoice rounding"));
+    await vi.advanceTimersByTimeAsync(30_000);
+    const follow = { projectId: "proj_billing", agent: "codex", sessionId: first.sessionId };
+
+    // An unknown model is rejected and does not start a turn.
+    expect(
+      await api.startTask(MAIN, { ...follow, prompt: "Which rounding?", model: "nope", requestId: "f-bad" }),
+    ).toMatchObject({ ok: false, error: { code: "invalid" } });
+    expect(value(await api.getSession(MAIN, "proj_billing", first.sessionId)).turns).toHaveLength(1);
+
+    const small = value(
+      await api.startTask(MAIN, { ...follow, prompt: "Which rounding?", model: "mock-small", requestId: "f-small" }),
+    );
+    expect(small.model).toBe("mock-small");
+    await vi.advanceTimersByTimeAsync(30_000);
+    const plain = value(await api.startTask(MAIN, { ...follow, prompt: "And the tax?", requestId: "f-plain" }));
+    expect(plain.model).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const turns = value(await api.getSession(MAIN, "proj_billing", first.sessionId)).turns;
+    expect(turns.map((t) => t.model)).toEqual([undefined, "mock-small", undefined]);
   });
 
   it("reports busy while another task is active in the same project", async () => {

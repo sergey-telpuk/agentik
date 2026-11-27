@@ -7,8 +7,10 @@
  *
  * What this object holds is deliberately small: the live sockets, the
  * challenge issued to each unauthenticated socket, the connection identifier
- * of each attached client, and counters for the limits. No frame contents,
- * no Noise keys, and no task history. Frames pass through as opaque bytes and
+ * of each attached client, and counters for the limits. No signaling
+ * contents, no Noise keys, and no task history. The object forwards WebRTC
+ * signaling (offers, answers, ICE) as opaque bytes and never application
+ * data: the phone and the computer exchange that over a DataChannel. Signals
  * are never written to storage or to logs.
  *
  * The WebSocket Hibernation API is used: the handler may be evicted while
@@ -23,11 +25,13 @@ import {
   KEEPALIVE_PONG,
   type AttachPayload,
   type ErrorCode,
-  type FramePayload,
+  type SignalPayload,
   type RegisterPayload,
   type ServerMessage,
   errorMessage,
-  frameMessage,
+  CLIENT_SIGNAL_KINDS,
+  DEVICE_SIGNAL_KINDS,
+  signalMessage,
   newConnectionId,
   parseClientMessage,
   serializeServerMessage,
@@ -80,11 +84,11 @@ interface SocketState {
   sourceIp?: string;
   /** Relay-assigned identifier of an attached client. */
   connectionId?: string;
-  /** When a client attached or last had a frame forwarded either way (epoch ms). */
+  /** When a client attached or last had a signal forwarded either way (epoch ms). */
   lastActivity?: number;
   /** Start of the current rate-limit window (epoch ms). */
   windowStart: number;
-  /** Frames seen in the current window. */
+  /** Messages seen in the current window. */
   windowCount: number;
 }
 
@@ -222,7 +226,7 @@ export class DeviceRoom implements DurableObject {
       return;
     }
 
-    const parsed = parseClientMessage(message, LIMITS.maxFrameBytes);
+    const parsed = parseClientMessage(message, LIMITS.maxSignalBytes);
     if (!parsed.ok) {
       // A malformed message is reported but does not close an established
       // session: a single bad frame should not drop a working connection.
@@ -243,8 +247,8 @@ export class DeviceRoom implements DurableObject {
       case "attach":
         this.#handleAttach(ws, current, parsed.value.payload);
         return;
-      case "frame":
-        this.#handleFrame(ws, current, parsed.value.payload);
+      case "signal":
+        this.#handleSignal(ws, current, parsed.value.payload);
         return;
     }
   }
@@ -486,7 +490,7 @@ export class DeviceRoom implements DurableObject {
   /**
    * Routes a client to this device.
    *
-   * No authority is granted here. The client can exchange frames; the device
+   * No authority is granted here. The client can exchange signals; the device
    * decides during the Noise handshake whether it is a paired peer.
    */
   #handleAttach(ws: WebSocket, state: SocketState, payload: AttachPayload): void {
@@ -553,32 +557,39 @@ export class DeviceRoom implements DurableObject {
     });
 
     // The device is told which client arrived, so it can expect a handshake
-    // on that connection rather than discovering it only when a frame appears.
+    // on that connection rather than discovering it only when a signal appears.
     for (const daemon of devices) {
       this.#send(daemon, { type: "peer_state", connectionId, present: true });
     }
   }
 
   /**
-   * Forwards one opaque frame to its addressee.
+   * Forwards one opaque signaling payload to its addressee.
    *
-   * A device frame goes to exactly the client it names. A client frame goes
+   * A device signal goes to exactly the client it names. A client signal goes
    * to the device, tagged with the connection id the relay assigned, so the
-   * device can keep a separate Noise session per client.
+   * device can keep a separate WebRTC session per client.
+   *
+   * Only signaling passes here. Each direction accepts a fixed set of kinds
+   * (see CLIENT_SIGNAL_KINDS and DEVICE_SIGNAL_KINDS), and the payload is
+   * never parsed: the relay checks the kind and the size and nothing else.
    *
    * The relay is not a queue: with no peer connected, the sender is told so
-   * rather than the frame being held for later delivery. A task is not
-   * accepted because the cloud took the bytes.
+   * rather than the payload being held for later delivery.
    */
-  #handleFrame(ws: WebSocket, state: SocketState, payload: FramePayload): void {
+  #handleSignal(ws: WebSocket, state: SocketState, payload: SignalPayload): void {
     if (state.role !== "device" && state.role !== "client") {
-      this.#closeWith(ws, "not_registered", "register or attach before sending frames");
+      this.#closeWith(ws, "not_registered", "register or attach before sending signals");
       return;
     }
 
     if (state.role === "device") {
+      if (!DEVICE_SIGNAL_KINDS.includes(payload.kind)) {
+        this.#send(ws, errorMessage("bad_request", `a device may not send ${payload.kind}`));
+        return;
+      }
       if (payload.connectionId === undefined) {
-        this.#send(ws, errorMessage("bad_request", "connection_id is required on device frames"));
+        this.#send(ws, errorMessage("bad_request", "connection_id is required on device signals"));
         return;
       }
       const target = this.#client(payload.connectionId);
@@ -589,7 +600,7 @@ export class DeviceRoom implements DurableObject {
         );
         return;
       }
-      if (this.#send(target, frameMessage(payload.data))) {
+      if (this.#send(target, signalMessage(payload.kind, payload.data))) {
         this.#touch(target);
       } else {
         this.#send(
@@ -605,6 +616,10 @@ export class DeviceRoom implements DurableObject {
     }
 
     // A client's identity comes from the relay, never from the client.
+    if (!CLIENT_SIGNAL_KINDS.includes(payload.kind)) {
+      this.#send(ws, errorMessage("bad_request", `a client may not send ${payload.kind}`));
+      return;
+    }
     if (payload.connectionId !== undefined) {
       this.#send(ws, errorMessage("bad_request", "clients must not set connection_id"));
       return;
@@ -618,12 +633,14 @@ export class DeviceRoom implements DurableObject {
       this.#send(ws, errorMessage("peer_unavailable", "the peer is not connected"));
       return;
     }
-    const message = serializeServerMessage(frameMessage(payload.data, state.connectionId));
+    const message = serializeServerMessage(
+      signalMessage(payload.kind, payload.data, state.connectionId),
+    );
     for (const daemon of devices) {
       if (!this.#forwardToDevice(daemon, message, state.connectionId)) {
         // The sender is closed, not the device: otherwise any peer that
-        // knows the device id could disconnect it by flooding frames.
-        this.#closeWith(ws, "rate_limited", "frames are arriving faster than the device reads them");
+        // knows the device id could disconnect it by flooding signals.
+        this.#closeWith(ws, "rate_limited", "signals are arriving faster than the device reads them");
         return;
       }
     }
@@ -631,9 +648,9 @@ export class DeviceRoom implements DurableObject {
   }
 
   /**
-   * Sends a client's frame to the device within that client's share of the
+   * Sends a client's signal to the device within that client's share of the
    * device's queue, and within the part of the queue clients may use at
-   * all. Returns false, without sending, when the frame does not fit.
+   * all. Returns false, without sending, when the signal does not fit.
    */
   #forwardToDevice(device: WebSocket, message: string, connectionId: string): boolean {
     const charged = this.#ledger(device).inFlight(connectionId);
@@ -666,7 +683,7 @@ export class DeviceRoom implements DurableObject {
   }
 
   /**
-   * Records a frame forwarded to or from a client, so it does not count as
+   * Records a signal forwarded to or from a client, so it does not count as
    * idle. Nothing else counts: a malformed or refused message would
    * otherwise let a client hold a slot by sending junk.
    */
@@ -747,7 +764,7 @@ export class DeviceRoom implements DurableObject {
     windowCount += 1;
     writeState(ws, { ...state, windowStart, windowCount });
     const allowed =
-      state.role === "device" ? LIMITS.maxDeviceFramesPerWindow : LIMITS.maxFramesPerWindow;
+      state.role === "device" ? LIMITS.maxDeviceMessagesPerWindow : LIMITS.maxMessagesPerWindow;
     return windowCount <= allowed;
   }
 
@@ -787,7 +804,7 @@ export class DeviceRoom implements DurableObject {
   /**
    * Closes a socket from the relay side.
    *
-   * The socket is marked closing first, so it stops receiving frames and its
+   * The socket is marked closing first, so it stops receiving signals and its
    * close event is not announced a second time. Its peers are told it left
    * unless `announce` is false.
    */

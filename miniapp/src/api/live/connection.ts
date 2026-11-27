@@ -1,13 +1,16 @@
 /**
- * One attempt to reach one computer: relay attach, Noise XX against the
- * pinned key, pairing state, then a synchronised session ready for commands.
+ * One attempt to reach one computer: signaling through the relay, a WebRTC
+ * DataChannel to the computer, Noise XX over that channel against the pinned
+ * key (with both DTLS fingerprints bound into the prologue), pairing state,
+ * then a synchronised session ready for commands.
  *
- * It replaces the orchestration that lived in the MVP status screen and
- * reports progress as `ConnectionState`. `failed` and `revoked` are final:
- * the relay is stopped and retrying means a new attempt. Losing the relay or
- * the computer after `ready` is not final while the relay keeps retrying; a
- * new peer epoch runs a fresh handshake, because a reconnect never resumes a
- * Noise session (AGENTIK.md section 6.1).
+ * The relay is used for signaling only and is closed as soon as the channel
+ * is open. There is no fallback: when the channel cannot open the attempt
+ * fails with the reason, and no application frame is ever sent to the relay.
+ * `failed` and `revoked` are final: retrying means a new attempt. A new
+ * signaling epoch while the channel is still opening restarts the
+ * negotiation, because a reconnect never resumes anything (AGENTIK.md
+ * section 6.1).
  */
 
 import { decodeBase32, decodeBase64Url } from "../../encoding";
@@ -16,6 +19,10 @@ import type { DeviceInfoResult, PairUpdatedEventData } from "../../protocol/mess
 import type { RelayClient, RelayStatus } from "../../relay/client";
 import { NoisePinMismatchError, type NoiseKeyPair } from "../../secure/noise";
 import type { SecureChannelFactory, SecureSession } from "../../secure/seam";
+import { LinkError, type DataLink, type LinkErrorCode } from "../../webrtc/link";
+import { webrtcPrologue } from "../../webrtc/prologue";
+import { SignalInbox, type Signaling } from "../../webrtc/signaling";
+import type { WebRtcSupport } from "../../webrtc/support";
 import type { PinnedDevice } from "../../storage/pinnedDevices";
 import { readRawInitData, sendInitDataVerification } from "../../telegram/initData";
 import type { TelegramRuntime } from "../../telegram/runtime";
@@ -32,10 +39,17 @@ export interface PendingPairing {
 /** What an attempt learned about the computer, for the computer list. */
 export type ComputerOutcome = "online" | "offline" | "replaced" | "revoked";
 
+/** Opens the DataChannel to the computer. Rejects with a `LinkError`. */
+export type OpenLink = (params: { readonly signaling: Signaling; readonly signal: AbortSignal }) => Promise<DataLink>;
+
 export interface AttemptDeps {
   readonly runtime: TelegramRuntime;
   readonly secureChannel: SecureChannelFactory;
+  /** The signaling connection. It carries SDP and ICE, never application data. */
   readonly createRelayClient: (device: PinnedDevice) => RelayClient;
+  readonly openLink: OpenLink;
+  /** Whether this WebView can open a DataChannel at all. */
+  readonly webRtcSupport: () => WebRtcSupport;
   readonly loadIdentity: () => Promise<{ ok: true; value: NoiseKeyPair } | { ok: false; message: string }>;
   readonly findPin: (computerId: string) => Promise<PinnedDevice | null>;
   readonly markConfirmed: (computerId: string) => Promise<void>;
@@ -59,6 +73,10 @@ export class ConnectAttempt {
   #final = false;
   #relay: RelayClient | null = null;
   #offStatus: (() => void) | null = null;
+  #offSignal: (() => void) | null = null;
+  #inbox = new SignalInbox();
+  #link: DataLink | null = null;
+  #offLinkClosed: (() => void) | null = null;
   #offlineTimer: ReturnType<typeof setTimeout> | null = null;
   #handledEpoch = 0;
   #device: PinnedDevice | null = null;
@@ -114,6 +132,18 @@ export class ConnectAttempt {
     this.#device = device;
     this.#identity = identity.value;
 
+    // No RTCPeerConnection means no data path at all. Say so; the relay is
+    // never contacted and nothing else is tried.
+    const support = this.#deps.webRtcSupport();
+    if (!support.supported) {
+      this.#fail(
+        "webrtc_unsupported",
+        `This phone cannot connect to a computer: ${support.reason}. Agentik sends all data over WebRTC and has no other path.`,
+        false,
+      );
+      return;
+    }
+
     let relay: RelayClient;
     try {
       relay = this.#deps.createRelayClient(device);
@@ -122,6 +152,9 @@ export class ConnectAttempt {
       return;
     }
     this.#relay = relay;
+    // Subscribe before the socket opens: the computer's ice_servers arrive
+    // right behind the relay's `attached`.
+    this.#offSignal = relay.onSignal((kind, data) => this.#inbox.push(kind, data));
     this.#offStatus = relay.onStatus((status) => this.#onRelayStatus(status));
     relay.start();
   }
@@ -158,7 +191,9 @@ export class ConnectAttempt {
         if (status.peerEpoch !== this.#handledEpoch) {
           this.#handledEpoch = status.peerEpoch;
           this.#dropSession();
-          void this.#handshake();
+          // Signals from an earlier negotiation belong to a dead peer.
+          this.#inbox.reset();
+          void this.#establish();
         }
         return;
     }
@@ -183,7 +218,8 @@ export class ConnectAttempt {
     this.#offlineTimer = null;
   }
 
-  async #handshake(): Promise<void> {
+  /** Opens the DataChannel, then runs the Noise handshake over it. */
+  async #establish(): Promise<void> {
     const relay = this.#relay;
     const device = this.#device;
     const identity = this.#identity;
@@ -196,13 +232,46 @@ export class ConnectAttempt {
     const abort = new AbortController();
     this.#abort = abort;
     const current = (): boolean => !this.#closed && !this.#final && generation === this.#generation;
+
+    const signaling: Signaling = {
+      send: (kind, data) => relay.sendSignal(kind, data),
+      onSignal: (handler) => this.#inbox.subscribe(handler),
+    };
+    let link: DataLink;
+    try {
+      link = await this.#deps.openLink({ signaling, signal: abort.signal });
+    } catch (err) {
+      if (!current()) return;
+      const code: LinkErrorCode = err instanceof LinkError ? err.code : "signaling";
+      this.#fail(linkFailure(code), `Could not open the data channel to ${this.#deps.computerName(this.computerId)}: ${messageOf(err)}`, code !== "unsupported");
+      return;
+    }
+    if (!current()) {
+      link.close();
+      return;
+    }
+    // The channel is up: signaling has done its job and the relay is released.
+    this.#link = link;
+    this.#offLinkClosed = link.onClosed((reason) => {
+      if (!current()) return;
+      this.#fail("link_lost", `The data channel to ${this.#deps.computerName(this.computerId)} closed (${reason}). Tasks already running there keep running.`, true);
+    });
+    this.#releaseRelay();
+
+    let prologue: Uint8Array;
+    try {
+      prologue = webrtcPrologue(deviceId, link.localFingerprint, link.remoteFingerprint);
+    } catch (err) {
+      this.#fail("handshake_failed", `The connection fingerprints are unusable (${messageOf(err)}).`, true);
+      return;
+    }
     this.#emit({ phase: "handshaking" });
 
     let session: SecureSession;
     try {
       session = await this.#deps.secureChannel.open({
-        transport: relay,
-        deviceId,
+        transport: link.transport,
+        prologue,
         pinnedNoisePublicKey: pinned,
         clientStaticPrivateKey: identity.privateKey,
         signal: abort.signal,
@@ -220,7 +289,7 @@ export class ConnectAttempt {
       }
       this.#fail(
         "handshake_failed",
-        `The secure handshake did not complete (${messageOf(err)}). Nothing was sent to the computer.`,
+        `The secure handshake did not complete (${messageOf(err)}). Nothing was sent to the computer. If this repeats, the connection may have been tampered with: the handshake fails when the DTLS fingerprints the two sides saw differ.`,
         true,
       );
       return;
@@ -376,11 +445,15 @@ export class ConnectAttempt {
     this.#teardown();
   }
 
-  /** Forgets the current secure session; the relay stays up. */
+  /** Forgets the current link and secure session; the relay is not touched. */
   #dropSession(): void {
     this.#generation++;
     this.#abort?.abort();
     this.#abort = null;
+    this.#offLinkClosed?.();
+    this.#offLinkClosed = null;
+    this.#link?.close();
+    this.#link = null;
     this.#offEvent?.();
     this.#offEvent = null;
     this.#candidate?.close();
@@ -393,8 +466,15 @@ export class ConnectAttempt {
   #teardown(): void {
     this.#clearOfflineTimer();
     this.#dropSession();
+    this.#releaseRelay();
+  }
+
+  /** Stops signaling: after the channel opened (or the attempt ended) the relay is not needed. */
+  #releaseRelay(): void {
     this.#offStatus?.();
     this.#offStatus = null;
+    this.#offSignal?.();
+    this.#offSignal = null;
     this.#relay?.stop();
     this.#relay = null;
   }
@@ -404,6 +484,22 @@ export class ConnectAttempt {
     if (!force && state.phase === this.#state.phase) return;
     this.#state = state;
     this.#onState(state);
+  }
+}
+
+function linkFailure(code: LinkErrorCode): ConnectFailure {
+  switch (code) {
+    case "unsupported":
+      return "webrtc_unsupported";
+    case "ice_failed":
+    case "timeout":
+      return "ice_failed";
+    case "closed":
+      return "link_lost";
+    case "signaling":
+      return "relay_unreachable";
+    case "protocol":
+      return "handshake_failed";
   }
 }
 

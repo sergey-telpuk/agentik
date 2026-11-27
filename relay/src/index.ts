@@ -3,7 +3,7 @@
  *
  * Its only job is to hand a WebSocket to the Durable Object that serves the
  * requested device. It runs no commands, holds no Noise keys, and reads no
- * frame contents.
+ * signaling contents.
  */
 
 import { DeviceRoom, type Env } from "./device-room";

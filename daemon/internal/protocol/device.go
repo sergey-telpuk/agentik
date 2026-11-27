@@ -68,3 +68,33 @@ func NoisePrologue(version uint16, initiator, responder Role, deviceID []byte) [
 		AddBytes(deviceID).
 		MustBytes()
 }
+
+// DTLSFingerprintSize is the length of a SHA-256 DTLS certificate fingerprint.
+const DTLSFingerprintSize = 32
+
+// NoiseWebRTCPrologue returns the prologue for a Noise handshake run over a
+// WebRTC DataChannel.
+//
+// It is NoisePrologue plus the DTLS certificate fingerprints of both peers,
+// each peer taking its own from the SDP it produced and the other's from the
+// SDP it received through signaling. If anyone on the signaling path swaps a
+// fingerprint, the two peers derive different prologues and the Noise
+// handshake fails. The fingerprints are length-checked so a truncated or
+// padded value cannot yield an ambiguous encoding.
+func NoiseWebRTCPrologue(
+	version uint16,
+	initiator, responder Role,
+	deviceID, initiatorFingerprint, responderFingerprint []byte,
+) ([]byte, error) {
+	if len(initiatorFingerprint) != DTLSFingerprintSize || len(responderFingerprint) != DTLSFingerprintSize {
+		return nil, fmt.Errorf("%w: DTLS fingerprints must be %d bytes", ErrMalformed, DTLSFingerprintSize)
+	}
+	return NewEncoder(ContextNoiseWebRTCPrologue).
+		AddUint16(version).
+		AddString(string(initiator)).
+		AddString(string(responder)).
+		AddBytes(deviceID).
+		AddBytes(initiatorFingerprint).
+		AddBytes(responderFingerprint).
+		Bytes()
+}

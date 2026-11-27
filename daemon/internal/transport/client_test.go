@@ -21,7 +21,7 @@ import (
 )
 
 type fakeRelay struct {
-	server *httptest.Server
+	server  *httptest.Server
 	relayID string
 
 	mu            sync.Mutex
@@ -29,18 +29,20 @@ type fakeRelay struct {
 	waitingConns  []string
 	registeredCnt int
 	pingCnt       int
-	received      []fakeFrame
+	received      []fakeSignal
 	lastRegister  *outboundRegister
 	dropAfterReg  int
 	suppressPong  bool
 	sendRawError  string
 	onRegister    func()
-	onFrame       func(connectionID string, data []byte)
+	onSignal      func(connectionID, kind string, data []byte)
+	onUnknown     func(msgType string)
 	onPing        func()
 }
 
-type fakeFrame struct {
+type fakeSignal struct {
 	connectionID string
+	kind         string
 	data         []byte
 }
 
@@ -135,6 +137,7 @@ func (f *fakeRelay) handle(w http.ResponseWriter, r *http.Request) {
 			Challenge         string `json:"challenge"`
 			ExpiresAt         int64  `json:"expires_at"`
 			Signature         string `json:"signature"`
+			Kind              string `json:"kind"`
 			Data              string `json:"data"`
 			ConnectionID      string `json:"connection_id"`
 		}
@@ -222,17 +225,24 @@ func (f *fakeRelay) handle(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-		case "frame":
+		case "signal":
 			data, err := base64.StdEncoding.DecodeString(env.Data)
 			if err != nil {
 				return
 			}
 			f.mu.Lock()
-			f.received = append(f.received, fakeFrame{connectionID: env.ConnectionID, data: data})
-			cb := f.onFrame
+			f.received = append(f.received, fakeSignal{connectionID: env.ConnectionID, kind: env.Kind, data: data})
+			cb := f.onSignal
 			f.mu.Unlock()
 			if cb != nil {
-				cb(env.ConnectionID, data)
+				cb(env.ConnectionID, env.Kind, data)
+			}
+		default:
+			f.mu.Lock()
+			cb := f.onUnknown
+			f.mu.Unlock()
+			if cb != nil {
+				cb(env.Type)
 			}
 		}
 	}
@@ -321,7 +331,7 @@ func TestComputeBackoffDelay(t *testing.T) {
 	}
 }
 
-func TestClientRegistersAndExchangesFrames(t *testing.T) {
+func TestClientRegistersAndExchangesSignals(t *testing.T) {
 	id := mustIdentity(t)
 	relay := newFakeRelay(t, "agentik-relay-test")
 	connA := "0123456789abcdef0123456789abcdef"
@@ -332,11 +342,11 @@ func TestClientRegistersAndExchangesFrames(t *testing.T) {
 		id      string
 		present bool
 	}, 4)
-	frameCh := make(chan fakeFrame, 4)
-	relayFrameAck := make(chan struct{}, 1)
-	relay.onFrame = func(connectionID string, data []byte) {
+	signalCh := make(chan fakeSignal, 4)
+	relaySignalAck := make(chan struct{}, 1)
+	relay.onSignal = func(connectionID, kind string, data []byte) {
 		select {
-		case relayFrameAck <- struct{}{}:
+		case relaySignalAck <- struct{}{}:
 		default:
 		}
 	}
@@ -359,8 +369,8 @@ func TestClientRegistersAndExchangesFrames(t *testing.T) {
 					present bool
 				}{connectionID, present}
 			},
-			OnFrame: func(connectionID string, data []byte) {
-				frameCh <- fakeFrame{connectionID: connectionID, data: bytes.Clone(data)}
+			OnSignal: func(connectionID, kind string, data []byte) {
+				signalCh <- fakeSignal{connectionID: connectionID, kind: kind, data: bytes.Clone(data)}
 			},
 		},
 	})
@@ -368,8 +378,8 @@ func TestClientRegistersAndExchangesFrames(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 
-	if err := client.SendFrame(context.Background(), connA, []byte("early")); !errors.Is(err, ErrNotConnected) {
-		t.Fatalf("SendFrame before connect: got %v, want ErrNotConnected", err)
+	if err := client.SendSignal(context.Background(), connA, SignalICE, []byte("early")); !errors.Is(err, ErrNotConnected) {
+		t.Fatalf("SendSignal before connect: got %v, want ErrNotConnected", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -402,47 +412,72 @@ func TestClientRegistersAndExchangesFrames(t *testing.T) {
 		t.Fatal("timed out waiting for peer_state")
 	}
 
-	// Verify inbound frame delivery with binary-like bytes.
+	// Verify inbound signal delivery with binary-like bytes.
 	inboundPayload := []byte{0x00, 0xff, 0x80, 0x01, 0x42}
+	relay.sendToDevice(t, map[string]any{
+		"type":         "signal",
+		"kind":         "offer",
+		"connectionId": connA,
+		"data":         base64.StdEncoding.EncodeToString(inboundPayload),
+	})
+	select {
+	case f := <-signalCh:
+		if f.connectionID != connA || f.kind != SignalOffer || !bytes.Equal(f.data, inboundPayload) {
+			t.Fatalf("received signal = %+v", f)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for inbound signal")
+	}
+
+	// A frame message, or a signal kind a client may not send, never reaches
+	// the handler: there is no application data path on the relay.
 	relay.sendToDevice(t, map[string]any{
 		"type":         "frame",
 		"connectionId": connA,
 		"data":         base64.StdEncoding.EncodeToString(inboundPayload),
 	})
+	relay.sendToDevice(t, map[string]any{
+		"type":         "signal",
+		"kind":         "answer",
+		"connectionId": connA,
+		"data":         base64.StdEncoding.EncodeToString(inboundPayload),
+	})
 	select {
-	case f := <-frameCh:
-		if f.connectionID != connA || !bytes.Equal(f.data, inboundPayload) {
-			t.Fatalf("received frame = %+v", f)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for inbound frame")
+	case f := <-signalCh:
+		t.Fatalf("unexpected delivery: %+v", f)
+	case <-time.After(150 * time.Millisecond):
 	}
 
-	// Verify outbound frame validation & delivery.
-	if err := client.SendFrame(ctx, "not-hex", []byte{1}); !errors.Is(err, ErrInvalidConnectionID) {
+	// Verify outbound signal validation & delivery.
+	if err := client.SendSignal(ctx, "not-hex", SignalICE, []byte{1}); !errors.Is(err, ErrInvalidConnectionID) {
 		t.Fatalf("invalid connection id: got %v", err)
 	}
-	if err := client.SendFrame(ctx, connA, nil); !errors.Is(err, ErrFrameEmpty) {
-		t.Fatalf("empty frame: got %v", err)
+	if err := client.SendSignal(ctx, connA, SignalICE, nil); !errors.Is(err, ErrSignalEmpty) {
+		t.Fatalf("empty signal: got %v", err)
 	}
-	if err := client.SendFrame(ctx, connA, make([]byte, MaxFrameBytes+1)); !errors.Is(err, ErrFrameTooLarge) {
-		t.Fatalf("oversized frame: got %v", err)
+	if err := client.SendSignal(ctx, connA, SignalICE, make([]byte, MaxSignalBytes+1)); !errors.Is(err, ErrSignalTooLarge) {
+		t.Fatalf("oversized signal: got %v", err)
+	}
+	for _, kind := range []string{"", "offer", "frame", "data", "ICE"} {
+		if err := client.SendSignal(ctx, connA, kind, []byte{1}); !errors.Is(err, ErrSignalKind) {
+			t.Fatalf("kind %q: got %v, want ErrSignalKind", kind, err)
+		}
 	}
 
-	outboundPayload := []byte("encrypted-response-payload")
-	if err := client.SendFrame(ctx, connB, outboundPayload); err != nil {
-		t.Fatalf("SendFrame: %v", err)
+	outboundPayload := []byte("sdp-answer-payload")
+	if err := client.SendSignal(ctx, connB, SignalAnswer, outboundPayload); err != nil {
+		t.Fatalf("SendSignal: %v", err)
 	}
 	select {
-	case <-relayFrameAck:
+	case <-relaySignalAck:
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for relay to receive frame")
+		t.Fatal("timed out waiting for relay to receive signal")
 	}
 
 	relay.mu.Lock()
 	got := relay.received
 	relay.mu.Unlock()
-	if len(got) != 1 || got[0].connectionID != connB || !bytes.Equal(got[0].data, outboundPayload) {
+	if len(got) != 1 || got[0].connectionID != connB || got[0].kind != SignalAnswer || !bytes.Equal(got[0].data, outboundPayload) {
 		t.Fatalf("relay received = %+v", got)
 	}
 
@@ -631,7 +666,7 @@ func TestClientStopsOnFatalRelayErrors(t *testing.T) {
 }
 
 // TestClientAgainstRealRelay verifies registration, keepalive, and client
-// attach/frame exchange against a live relay when AGENTIK_TEST_RELAY_URL is set.
+// attach/signal exchange against a live relay when AGENTIK_TEST_RELAY_URL is set.
 func TestClientAgainstRealRelay(t *testing.T) {
 	relayURL := os.Getenv("AGENTIK_TEST_RELAY_URL")
 	if relayURL == "" {
@@ -641,7 +676,7 @@ func TestClientAgainstRealRelay(t *testing.T) {
 	id := mustIdentity(t)
 	regCh := make(chan string, 1)
 	peerCh := make(chan string, 2)
-	frameCh := make(chan fakeFrame, 2)
+	signalCh := make(chan fakeSignal, 2)
 
 	client, err := NewClient(Config{
 		RelayURL:        relayURL,
@@ -656,8 +691,8 @@ func TestClientAgainstRealRelay(t *testing.T) {
 					peerCh <- connectionID
 				}
 			},
-			OnFrame: func(connectionID string, data []byte) {
-				frameCh <- fakeFrame{connectionID: connectionID, data: bytes.Clone(data)}
+			OnSignal: func(connectionID, kind string, data []byte) {
+				signalCh <- fakeSignal{connectionID: connectionID, kind: kind, data: bytes.Clone(data)}
 			},
 		},
 	})
@@ -723,26 +758,27 @@ func TestClientAgainstRealRelay(t *testing.T) {
 
 	// Phone -> Relay -> Device
 	c2d := []byte("hello-real-wrangler-relay")
-	cFrame, _ := json.Marshal(map[string]any{
-		"type": "frame",
+	cSignal, _ := json.Marshal(map[string]any{
+		"type": "signal",
+		"kind": "offer",
 		"data": base64.StdEncoding.EncodeToString(c2d),
 	})
-	if err := ws.Write(ctx, websocket.MessageText, cFrame); err != nil {
+	if err := ws.Write(ctx, websocket.MessageText, cSignal); err != nil {
 		t.Fatal(err)
 	}
 	select {
-	case f := <-frameCh:
-		if f.connectionID != attached.ConnectionID || !bytes.Equal(f.data, c2d) {
-			t.Fatalf("device frame = %+v", f)
+	case f := <-signalCh:
+		if f.connectionID != attached.ConnectionID || f.kind != SignalOffer || !bytes.Equal(f.data, c2d) {
+			t.Fatalf("device signal = %+v", f)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for client frame on device")
+		t.Fatal("timed out waiting for client signal on device")
 	}
 
 	// Device -> Relay -> Phone
 	d2c := []byte("reply-from-go-daemon")
-	if err := client.SendFrame(ctx, attached.ConnectionID, d2c); err != nil {
-		t.Fatalf("SendFrame: %v", err)
+	if err := client.SendSignal(ctx, attached.ConnectionID, SignalAnswer, d2c); err != nil {
+		t.Fatalf("SendSignal: %v", err)
 	}
 	_, backRaw, err := ws.Read(ctx)
 	if err != nil {
@@ -750,10 +786,11 @@ func TestClientAgainstRealRelay(t *testing.T) {
 	}
 	var back struct {
 		Type string `json:"type"`
+		Kind string `json:"kind"`
 		Data string `json:"data"`
 	}
-	if err := json.Unmarshal(backRaw, &back); err != nil || back.Type != "frame" {
-		t.Fatalf("unexpected reply frame: %s (%v)", backRaw, err)
+	if err := json.Unmarshal(backRaw, &back); err != nil || back.Type != "signal" || back.Kind != "answer" {
+		t.Fatalf("unexpected reply signal: %s (%v)", backRaw, err)
 	}
 	gotBack, _ := base64.StdEncoding.DecodeString(back.Data)
 	if !bytes.Equal(gotBack, d2c) {

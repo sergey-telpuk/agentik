@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	modelListTimeout  = 15 * time.Second
-	maxModelPages     = 5
+	modelListTimeout = 15 * time.Second
+	maxModelPages    = 5
 	// maxModelsTotal and the text bounds keep an agent.list response well
 	// inside the 32 KiB relay frame.
 	maxModelsTotal    = 50
@@ -69,7 +69,7 @@ func (a *AppServerAdapter) listModels(ctx context.Context) ([]Model, error) {
 	}
 	defer func() {
 		_ = stdin.Close()
-		_ = cmd.Process.Kill()
+		killProcessTree(cmd.Process)
 		_ = cmd.Wait()
 	}()
 

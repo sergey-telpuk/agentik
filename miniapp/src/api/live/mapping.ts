@@ -78,6 +78,7 @@ export function taskSummaryFromView(view: TaskView, lastSeq: number): TaskSummar
     sessionId: view.session_id,
     agent: "codex",
     prompt: view.prompt,
+    ...(view.model === undefined || view.model === "" ? {} : { model: view.model }),
     state: taskStateOf(view.state),
     createdAt: secondsToMs(view.created_at),
     updatedAt: secondsToMs(view.updated_at),

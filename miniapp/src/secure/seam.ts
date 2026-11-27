@@ -5,16 +5,21 @@
  * Everything confidential (`initData`, pairing submission, agent commands,
  * task events, approvals) is expressed against `SecureSession`, never against
  * `FrameTransport` directly, so application code cannot accidentally emit
- * plaintext to the relay.
+ * plaintext on the DataChannel.
  */
 
 import type { FrameTransport } from "../relay/frame-transport";
 
 /** A phone's confirmed view of the computer it talks to. */
 export interface SecureChannelParams {
+  /** The DataChannel carrying the handshake and, afterwards, the session. */
   readonly transport: FrameTransport;
-  /** The 32-byte device identifier the relay routes by. */
-  readonly deviceId: Uint8Array;
+  /**
+   * The Noise prologue. It binds this connection's identity, including both
+   * DTLS fingerprints (`webrtcPrologue`): a mismatch with the computer's view
+   * makes the handshake fail.
+   */
+  readonly prologue: Uint8Array;
   /** The pinned X25519 static public key of the daemon. A mismatch aborts. */
   readonly pinnedNoisePublicKey: Uint8Array;
   /** This phone's long-term X25519 static private key (32 bytes). */

@@ -5,20 +5,20 @@
  * measured capacity. Load testing moves them here.
  *
  * Enforced per connection (in the Durable Object):
- * - frame payload at most `maxFrameBytes`; a raw message longer than
- *   `maxMessageLength(maxFrameBytes)` is rejected before it is parsed;
- * - at most `maxFramesPerWindow` messages per `rateWindowMs` from a client,
- *   `maxDeviceFramesPerWindow` from the device (it serves every client);
+ * - signaling payload at most `maxSignalBytes`; a raw message longer than
+ *   `maxMessageLength(maxSignalBytes)` is rejected before it is parsed;
+ * - at most `maxMessagesPerWindow` messages per `rateWindowMs` from a client,
+ *   `maxDeviceMessagesPerWindow` from the device (it serves every client);
  *   keepalive pings are answered by the platform and do not count;
- * - at most `maxBufferedBytes` queued toward a client, frames and the
+ * - at most `maxBufferedBytes` queued toward a client, signals and the
  *   relay's own replies alike; a slower client is closed instead of
  *   letting the queue grow.
  *
  * Enforced on the device's queue (in the Durable Object), which every client
  * of the device writes into:
- * - at most `maxClientShareBytes` of one client's frames in flight, and at
- *   most `maxDeviceBufferedBytes - deviceReserveBytes` of client frames in
- *   all. A client whose frame does not fit is closed, never the device, so
+ * - at most `maxClientShareBytes` of one client's signals in flight, and at
+ *   most `maxDeviceBufferedBytes - deviceReserveBytes` of client signals in
+ *   all. A client whose signal does not fit is closed, never the device, so
  *   a peer that knows a device id cannot disconnect the device by flooding
  *   it, and one client cannot take the others' share;
  * - a client may attach only while the device's queue has room for its
@@ -65,8 +65,8 @@
  */
 
 export const LIMITS = {
-  /** Largest frame payload the relay will forward, in bytes. */
-  maxFrameBytes: 32 * 1024,
+  /** Largest signaling payload (offer, answer, ICE) the relay will forward, in bytes. */
+  maxSignalBytes: 32 * 1024,
   /**
    * How long a socket may stay unauthenticated (neither registered nor
    * attached). Past it the socket is closed, whether or not it ever sends.
@@ -80,27 +80,27 @@ export const LIMITS = {
   /** Clients attached to one device at once. */
   maxClients: 4,
   /**
-   * A client with no frames forwarded in either direction for this long
+   * A client with no signals forwarded in either direction for this long
    * counts as idle, and may be evicted when all client slots are taken.
    * Malformed or refused messages and keepalive pings do not count.
    */
   clientIdleMs: 30_000,
   /** Messages per window from one client socket. */
-  maxFramesPerWindow: 120,
+  maxMessagesPerWindow: 120,
   /** Messages per window from the device, which multiplexes every client. */
-  maxDeviceFramesPerWindow: 120 * 4,
+  maxDeviceMessagesPerWindow: 120 * 4,
   /** Length of the rate-limiting window. */
   rateWindowMs: 1_000,
   /** Bytes allowed to queue toward one client before it is closed. */
   maxBufferedBytes: 256 * 1024,
   /**
-   * Bytes of one client's frames allowed in flight toward the device. It
-   * holds one frame at the payload limit; a client that would go past it is
+   * Bytes of one client's signals allowed in flight toward the device. It
+   * holds one signal at the payload limit; a client that would go past it is
    * closed.
    */
   maxClientShareBytes: 64 * 1024,
   /**
-   * Part of the device's queue that client frames may not use, kept for the
+   * Part of the device's queue that client signals may not use, kept for the
    * relay's own messages to the device: presence notices and error replies.
    */
   deviceReserveBytes: 64 * 1024,

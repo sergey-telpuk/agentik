@@ -294,7 +294,7 @@ p {
 }
 
 .button-small {
-  min-height: 36px;
+  min-height: 44px;
   padding: 6px 12px;
   font-size: 14px;
 }
@@ -459,12 +459,16 @@ p {
   font-weight: 600;
 }
 
-/* Computers list: a messenger-style row with the app icon, name and id, and an OPEN pill. */
+/*
+ * List rows (ZONT style): a 48px icon tile, a title with secondary text, and an
+ * optional pill or chip. Computers and conversations share this one shape.
+ */
 
-.computer-row {
+.row {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-height: 68px;
   padding: 10px var(--pad) 10px 12px;
   background: var(--section-bg);
   border-radius: var(--radius);
@@ -472,20 +476,31 @@ p {
   cursor: pointer;
 }
 
-.computer-icon {
+.row-attention {
+  box-shadow: 0 0 0 1.5px var(--warn);
+}
+
+.row-icon {
   flex: none;
+  display: grid;
+  place-items: center;
   width: 48px;
   height: 48px;
   border-radius: 11px;
 }
 
-.computer-row-main {
+.row-icon-chat {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.row-main {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
+  gap: 4px;
   min-height: 48px;
   justify-content: center;
   padding: 0;
@@ -495,33 +510,58 @@ p {
   text-align: left;
   cursor: pointer;
   border-radius: var(--radius-small);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.row-title {
+  max-width: 100%;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .computer-name {
-  max-width: 100%;
-  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.computer-id {
+.row-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.row-secondary {
   max-width: 100%;
   font-size: 14px;
   color: var(--hint);
+}
+
+.computer-id {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .button-pill {
+  position: relative;
   flex: none;
-  min-height: 34px;
+  min-height: 36px;
   padding: 6px 18px;
   border-radius: 999px;
   font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.04em;
+}
+
+/* The visible pill is 36px; its tap area is 44px. */
+.button-pill::after {
+  content: "";
+  position: absolute;
+  inset: -4px -6px;
 }
 
 .forget-button {
@@ -661,6 +701,31 @@ p {
   color: var(--hint);
 }
 
+.get-started {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  color: var(--text);
+}
+
+.download-links {
+  display: flex;
+  flex-direction: column;
+}
+
+.download-link {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.get-started code {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
 .skeleton-list {
   display: flex;
   flex-direction: column;
@@ -773,9 +838,10 @@ select:disabled {
   display: flex;
   align-items: flex-start;
   gap: 12px;
+  min-height: 56px;
   padding: 12px 14px;
   margin-bottom: 6px;
-  border-radius: var(--radius-small);
+  border-radius: var(--radius);
   background: var(--section-bg);
   box-shadow: 0 0 0 1px var(--separator);
   cursor: pointer;
@@ -986,7 +1052,7 @@ select:disabled {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--hint);
 }
 
@@ -1127,7 +1193,7 @@ select:disabled {
 
 .bubble-agent {
   align-self: flex-start;
-  min-width: 55%;
+  min-width: 40%;
   border-bottom-left-radius: 6px;
   background: var(--section-bg);
   box-shadow: 0 0 0 1px var(--separator);
@@ -1139,9 +1205,15 @@ select:disabled {
 
 .bubble-time {
   align-self: flex-end;
-  font-size: 11px;
+  font-size: 13px;
   opacity: 0.75;
   font-variant-numeric: tabular-nums;
+}
+
+.bubble-sender {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--accent);
 }
 
 .bubble-head {
@@ -1167,15 +1239,23 @@ select:disabled {
   flex-wrap: wrap;
 }
 
+.bubble-actions .button-ghost {
+  min-width: 44px;
+  padding-inline: 0;
+  justify-content: flex-start;
+}
+
 .bubble-steps summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
   cursor: pointer;
   color: var(--link);
-  font-size: 14px;
-  padding: 4px 0;
+  font-size: 15px;
 }
 
 .bubble-steps[open] summary {
-  margin-bottom: 8px;
+  margin-bottom: 4px;
 }
 
 .bubble-changes {
@@ -1206,14 +1286,41 @@ select:disabled {
 
 .composer-input {
   flex: 1;
-  min-height: 48px;
+  min-height: 44px;
   max-height: 160px;
+  padding: 10px 16px;
+  border-radius: 22px;
   resize: none;
+}
+
+.composer-actions {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
 }
 
 .composer-send {
   flex: none;
-  min-height: 48px;
+  min-height: 44px;
+  padding: 10px 20px;
+  border-radius: 22px;
+}
+
+/* A small pill that shows the model of the conversation; it is a native select. */
+select.model-chip {
+  width: auto;
+  max-width: 132px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--secondary-bg);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -48,7 +48,7 @@ var cipherSuite = noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, no
 // MaxMessageSize bounds a single Noise transport message.
 //
 // Noise itself caps a message at 65535 bytes. The design document starts from
-// a 32 KiB payload budget for relay frames, so the plaintext bound is set
+// a 32 KiB payload budget for DataChannel frames, so the plaintext bound is set
 // below the Noise cap with room for the authentication tag.
 const MaxMessageSize = 32 * 1024
 
@@ -278,10 +278,26 @@ func (s *Session) Decrypt(ciphertext []byte) ([]byte, error) {
 	return out, nil
 }
 
-// DevicePrologue returns the prologue for a phone-to-daemon session.
-//
-// Both peers derive it from the same inputs; any disagreement makes the
-// handshake fail rather than producing a session with mismatched assumptions.
+// DevicePrologue returns the base prologue for a phone-to-daemon session,
+// without any transport binding. It pins the protocol version, the roles and
+// the device. It is kept for Noise-layer tests and the cross-language vector;
+// sessions over WebRTC use WebRTCPrologue, which also binds the DTLS
+// fingerprints.
 func DevicePrologue(deviceID []byte) []byte {
 	return protocol.NoisePrologue(protocol.Version, protocol.RoleClient, protocol.RoleDevice, deviceID)
+}
+
+// WebRTCPrologue returns the prologue for a phone-to-daemon session carried
+// over a WebRTC DataChannel.
+//
+// clientFingerprint is the phone's DTLS certificate fingerprint and
+// deviceFingerprint is the daemon's, both SHA-256 (32 bytes). Each peer reads
+// its own from the SDP it produced and the other's from the SDP it received
+// through the relay. A swapped fingerprint on the signaling path makes the
+// two prologues differ, so the handshake fails.
+func WebRTCPrologue(deviceID, clientFingerprint, deviceFingerprint []byte) ([]byte, error) {
+	return protocol.NoiseWebRTCPrologue(
+		protocol.Version, protocol.RoleClient, protocol.RoleDevice,
+		deviceID, clientFingerprint, deviceFingerprint,
+	)
 }

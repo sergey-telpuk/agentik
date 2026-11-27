@@ -7,8 +7,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -363,19 +361,11 @@ func TestPairingRejectsPinSubstitution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 1. Tamper NoisePublicKey in wire payload without the registration key.
-	rawJSON, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(issued.InvitationText, InvitationPrefix))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wire InvitationWire
-	if err := json.Unmarshal(rawJSON, &wire); err != nil {
-		t.Fatal(err)
-	}
+	// 1. Replace the Noise key inside the invitation without the registration key.
 	attackerNoiseKey := newPhoneKey(t)
-	wire.NoisePublicKey = base64.RawURLEncoding.EncodeToString(attackerNoiseKey)
-	tamperedJSON, _ := json.Marshal(wire)
-	tamperedText := InvitationPrefix + base64.RawURLEncoding.EncodeToString(tamperedJSON)
+	raw := decodeInvitationBytes(t, issued.InvitationText)
+	copy(raw[2+32:2+32+32], attackerNoiseKey)
+	tamperedText := encodeInvitationBytes(raw)
 
 	if _, err := ParseInvitation(tamperedText, *now); !errors.Is(err, protocol.ErrSignature) {
 		t.Fatalf("tampered invitation noise key: got %v, want ErrSignature", err)

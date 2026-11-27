@@ -1,12 +1,13 @@
 import type { NoiseCipherState } from "@richardhopton/noise-c.wasm";
 import { describe, expect, it } from "vitest";
 import type { FrameTransport } from "../relay/frame-transport";
+import { webrtcPrologue } from "../webrtc/prologue";
 import {
   createNoiseChannelFactory,
   devicePrologue,
   generateNoiseKeyPair,
   loadFreshNoiseRuntime,
-  MAX_RELAY_PLAINTEXT_SIZE,
+  MAX_PLAINTEXT_SIZE,
   NOISE_PROTOCOL_NAME,
   NoiseHandshakeError,
   NoisePayloadTooLargeError,
@@ -21,6 +22,11 @@ function hexToBytes(hex: string): Uint8Array {
     out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   }
   return out;
+}
+
+/** The prologue connections use: both DTLS fingerprints bound in. */
+function bound(deviceId: Uint8Array, computerFingerprint: Uint8Array = new Uint8Array(32).fill(0xb2)): Uint8Array {
+  return webrtcPrologue(deviceId, new Uint8Array(32).fill(0xa1), computerFingerprint);
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -168,7 +174,7 @@ describe("NoiseChannelFactory", () => {
   }> {
     const noise = await loadFreshNoiseRuntime();
     const hs = new noise.HandshakeState(NOISE_PROTOCOL_NAME, noise.constants.NOISE_ROLE_RESPONDER);
-    hs.Initialize(devicePrologue(deviceId), respPriv, null, null);
+    hs.Initialize(bound(deviceId), respPriv, null, null);
     let step = 1;
     let sendCipher: NoiseCipherState | null = null;
     let recvCipher: NoiseCipherState | null = null;
@@ -220,7 +226,7 @@ describe("NoiseChannelFactory", () => {
 
     const noise = await loadFreshNoiseRuntime();
     const hs = new noise.HandshakeState(NOISE_PROTOCOL_NAME, noise.constants.NOISE_ROLE_RESPONDER);
-    hs.Initialize(devicePrologue(deviceId), daemonKeys.privateKey, null, null);
+    hs.Initialize(bound(deviceId), daemonKeys.privateKey, null, null);
     let step = 1;
     let clientStaticFromMsg3: Uint8Array | null = null;
     daemon.onFrame((frame) => {
@@ -243,7 +249,7 @@ describe("NoiseChannelFactory", () => {
     const factory = createNoiseChannelFactory();
     const session = await factory.open({
       transport: client,
-      deviceId,
+      prologue: bound(deviceId),
       pinnedNoisePublicKey: daemonKeys.publicKey,
       clientStaticPrivateKey: clientKeys.privateKey,
     });
@@ -273,7 +279,7 @@ describe("NoiseChannelFactory", () => {
     expect(errors).toHaveLength(1);
 
     // Oversized message rejected before encrypting.
-    expect(() => session.send(new Uint8Array(MAX_RELAY_PLAINTEXT_SIZE + 1))).toThrow(
+    expect(() => session.send(new Uint8Array(MAX_PLAINTEXT_SIZE + 1))).toThrow(
       NoisePayloadTooLargeError,
     );
 
@@ -296,7 +302,7 @@ describe("NoiseChannelFactory", () => {
     await expect(
       factory.open({
         transport: client,
-        deviceId,
+        prologue: bound(deviceId),
         pinnedNoisePublicKey: wrongPin,
         clientStaticPrivateKey: clientKeys.privateKey,
       }),
@@ -316,10 +322,51 @@ describe("NoiseChannelFactory", () => {
     await expect(
       factory.open({
         transport: client,
-        deviceId,
+        prologue: bound(deviceId),
         pinnedNoisePublicKey: daemonKeys.publicKey,
         clientStaticPrivateKey: clientKeys.privateKey,
         handshakeTimeoutMs: 25,
+      }),
+    ).rejects.toBeInstanceOf(NoiseHandshakeError);
+  });
+  it("fails when the computer's prologue disagrees about a DTLS fingerprint, and sends no message 3", async () => {
+    const deviceId = hexToBytes(GO_VECTOR.deviceIdHex);
+    const clientKeys = await generateNoiseKeyPair();
+    const daemonKeys = await generateNoiseKeyPair();
+    const { client, daemon, clientSent } = createLinkedTransports();
+
+    // The responder believes its own fingerprint is different from the one the
+    // phone saw in the answer: what a signaling man in the middle causes.
+    const noise = await loadFreshNoiseRuntime();
+    const hs = new noise.HandshakeState(NOISE_PROTOCOL_NAME, noise.constants.NOISE_ROLE_RESPONDER);
+    hs.Initialize(bound(deviceId, new Uint8Array(32).fill(0xc3)), daemonKeys.privateKey, null, null);
+    daemon.onFrame((frame) => {
+      hs.ReadMessage(frame, false, false);
+      daemon.sendFrame(hs.WriteMessage(null));
+    });
+
+    await expect(
+      createNoiseChannelFactory().open({
+        transport: client,
+        prologue: bound(deviceId),
+        pinnedNoisePublicKey: daemonKeys.publicKey,
+        clientStaticPrivateKey: clientKeys.privateKey,
+        handshakeTimeoutMs: 200,
+      }),
+    ).rejects.toBeInstanceOf(NoiseHandshakeError);
+    expect(clientSent).toHaveLength(1);
+  });
+
+  it("refuses to run without a prologue", async () => {
+    const clientKeys = await generateNoiseKeyPair();
+    const daemonKeys = await generateNoiseKeyPair();
+    const { client } = createLinkedTransports();
+    await expect(
+      createNoiseChannelFactory().open({
+        transport: client,
+        prologue: new Uint8Array(0),
+        pinnedNoisePublicKey: daemonKeys.publicKey,
+        clientStaticPrivateKey: clientKeys.privateKey,
       }),
     ).rejects.toBeInstanceOf(NoiseHandshakeError);
   });

@@ -3,12 +3,14 @@ import { encodeBase64 } from "../encoding";
 import {
   computeBackoffDelay,
   DEFAULT_BACKOFF,
-  DEFAULT_MAX_FRAME_BYTES,
-  FrameTooLargeError,
+  DEFAULT_MAX_SIGNAL_BYTES,
   KEEPALIVE_PING,
   RELAY_CLOSE_CODES,
   RelayClient,
   RelayNotConnectedError,
+  SignalKindError,
+  SignalTooLargeError,
+  type SignalKind,
   type BackoffOptions,
   type RelayClientOptions,
   type WebSocketLike,
@@ -339,7 +341,7 @@ describe("RelayClient: reconnect with backoff", () => {
   });
 });
 
-describe("RelayClient: frames", () => {
+describe("RelayClient: signaling only", () => {
   function attached(): Harness {
     const h = setup();
     h.client.start();
@@ -347,68 +349,97 @@ describe("RelayClient: frames", () => {
     h.latest().attach();
     return h;
   }
+  const payload = (...bytes: number[]): string => encodeBase64(Uint8Array.of(...bytes));
 
-  it("encodes outgoing frames as opaque base64", () => {
+  it("encodes outgoing signals as opaque base64 with their kind", () => {
     const { client, latest } = attached();
-    client.sendFrame(Uint8Array.of(1, 2, 3, 250));
-    expect(latest().sent.at(-1)).toEqual({ type: "frame", data: encodeBase64(Uint8Array.of(1, 2, 3, 250)) });
+    client.sendSignal("offer", Uint8Array.of(1, 2, 3, 250));
+    client.sendSignal("ice", Uint8Array.of(7));
+    expect(latest().sent.slice(1)).toEqual([
+      { type: "signal", kind: "offer", data: payload(1, 2, 3, 250) },
+      { type: "signal", kind: "ice", data: payload(7) },
+    ]);
   });
 
-  it("delivers incoming frames as bytes to every subscriber", () => {
+  it("has no way to send application data: only offer and ice may leave the phone", () => {
     const { client, latest } = attached();
-    const a: number[][] = [];
-    const b: number[][] = [];
-    client.onFrame((f) => a.push(Array.from(f)));
-    const off = client.onFrame((f) => b.push(Array.from(f)));
-    latest().receive({ type: "frame", data: encodeBase64(Uint8Array.of(9, 8, 7)) });
+    for (const kind of ["answer", "ice_servers", "frame", "data", ""]) {
+      expect(() => client.sendSignal(kind as SignalKind, Uint8Array.of(1))).toThrow(SignalKindError);
+    }
+    expect((client as unknown as Record<string, unknown>)["sendFrame"]).toBeUndefined();
+    expect((client as unknown as Record<string, unknown>)["onFrame"]).toBeUndefined();
+    // Nothing but the attach went out.
+    expect(latest().sent).toHaveLength(1);
+  });
+
+  it("delivers the computer's signals with their kind to every subscriber", () => {
+    const { client, latest } = attached();
+    const a: [string, number[]][] = [];
+    const b: [string, number[]][] = [];
+    client.onSignal((k, d) => a.push([k, Array.from(d)]));
+    const off = client.onSignal((k, d) => b.push([k, Array.from(d)]));
+    latest().receive({ type: "signal", kind: "answer", data: payload(9, 8, 7) });
     off();
-    latest().receive({ type: "frame", data: encodeBase64(Uint8Array.of(1)) });
-    expect(a).toEqual([[9, 8, 7], [1]]);
-    expect(b).toEqual([[9, 8, 7]]);
+    latest().receive({ type: "signal", kind: "ice", data: payload(1) });
+    latest().receive({ type: "signal", kind: "ice_servers", data: payload(2) });
+    expect(a).toEqual([["answer", [9, 8, 7]], ["ice", [1]], ["ice_servers", [2]]]);
+    expect(b).toEqual([["answer", [9, 8, 7]]]);
   });
 
   it("refuses to send, rather than queue, when not attached", () => {
     const { client, latest } = setup();
-    expect(() => client.sendFrame(Uint8Array.of(1))).toThrow(RelayNotConnectedError);
+    expect(() => client.sendSignal("offer", Uint8Array.of(1))).toThrow(RelayNotConnectedError);
     client.start();
     latest().open();
-    expect(() => client.sendFrame(Uint8Array.of(1))).toThrow(RelayNotConnectedError);
+    expect(() => client.sendSignal("offer", Uint8Array.of(1))).toThrow(RelayNotConnectedError);
     latest().attach();
     latest().drop();
-    expect(() => client.sendFrame(Uint8Array.of(1))).toThrow(RelayNotConnectedError);
+    expect(() => client.sendSignal("offer", Uint8Array.of(1))).toThrow(RelayNotConnectedError);
     // Nothing was sent beyond the attach.
     expect(latest().sent).toHaveLength(1);
   });
 
-  it("refuses empty and oversized outgoing frames", () => {
+  it("refuses empty and oversized outgoing signals", () => {
     const { client } = attached();
-    expect(() => client.sendFrame(new Uint8Array(0))).toThrow();
-    expect(() => client.sendFrame(new Uint8Array(DEFAULT_MAX_FRAME_BYTES + 1))).toThrow(FrameTooLargeError);
-    expect(() => client.sendFrame(new Uint8Array(DEFAULT_MAX_FRAME_BYTES))).not.toThrow();
+    expect(() => client.sendSignal("ice", new Uint8Array(0))).toThrow();
+    expect(() => client.sendSignal("ice", new Uint8Array(DEFAULT_MAX_SIGNAL_BYTES + 1))).toThrow(SignalTooLargeError);
+    expect(() => client.sendSignal("ice", new Uint8Array(DEFAULT_MAX_SIGNAL_BYTES))).not.toThrow();
   });
 
-  it("ignores frames that arrive before the attach is confirmed", () => {
+  it("ignores signals that arrive before the attach is confirmed", () => {
     const { client, latest } = setup();
     const seen: unknown[] = [];
-    client.onFrame((f) => seen.push(f));
+    client.onSignal((k) => seen.push(k));
     client.start();
     latest().open();
-    latest().receive({ type: "frame", data: encodeBase64(Uint8Array.of(1)) });
+    latest().receive({ type: "signal", kind: "answer", data: payload(1) });
     expect(seen).toEqual([]);
   });
 
-  it("ignores malformed relay messages without crashing", () => {
+  it("never delivers a legacy frame message, so no data can arrive through the relay", () => {
     const { client, latest } = attached();
     const seen: unknown[] = [];
-    client.onFrame((f) => seen.push(f));
+    client.onSignal((k) => seen.push(k));
+    latest().receive({ type: "frame", data: payload(1, 2, 3) });
+    expect(seen).toEqual([]);
+    expect(client.getStatus().state).toBe("connected");
+  });
+
+  it("ignores signal kinds a computer may not send, and malformed relay messages, without crashing", () => {
+    const { client, latest } = attached();
+    const seen: unknown[] = [];
+    client.onSignal((k) => seen.push(k));
     for (const bad of [
       "not json",
       "[]",
       "null",
-      { type: "frame" },
-      { type: "frame", data: "***" },
-      { type: "frame", data: "" },
-      { type: "frame", data: 5 },
+      { type: "signal" },
+      { type: "signal", kind: "offer", data: payload(1) },
+      { type: "signal", kind: "bogus", data: payload(1) },
+      { type: "signal", kind: "answer" },
+      { type: "signal", kind: "answer", data: "***" },
+      { type: "signal", kind: "answer", data: "" },
+      { type: "signal", kind: "answer", data: 5 },
       { type: "peer_state", present: "yes" },
       { type: "attached", devicePresent: "yes" },
       { type: "unknown" },
@@ -421,11 +452,11 @@ describe("RelayClient: frames", () => {
     expect(client.getStatus().state).toBe("connected");
   });
 
-  it("drops incoming frames larger than the limit", () => {
+  it("drops incoming signals larger than the limit", () => {
     const { client, latest } = attached();
     const seen: unknown[] = [];
-    client.onFrame((f) => seen.push(f));
-    latest().receive({ type: "frame", data: encodeBase64(new Uint8Array(DEFAULT_MAX_FRAME_BYTES + 1)) });
+    client.onSignal((k) => seen.push(k));
+    latest().receive({ type: "signal", kind: "answer", data: encodeBase64(new Uint8Array(DEFAULT_MAX_SIGNAL_BYTES + 1)) });
     expect(seen).toEqual([]);
   });
 });

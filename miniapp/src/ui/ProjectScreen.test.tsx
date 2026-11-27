@@ -74,11 +74,13 @@ describe("ProjectScreen", () => {
       "live",
       opened,
     );
-    const rows = [...container.querySelectorAll("li.card")];
+    const rows = [...container.querySelectorAll("li.row")];
     expect(rows).toHaveLength(2);
     expect(rows[0]?.textContent).toContain("Refactor the parser");
     expect(rows[0]?.textContent).toContain("3 messages");
     expect(rows[1]?.textContent).toContain("Fix the build");
+    // Every row shows its message count, also for a single message.
+    expect(rows[1]?.textContent).toContain("1 message ·");
     expect(container.textContent).not.toContain("cannot list earlier conversations");
     act(() => rows[0]?.querySelector("button")?.click());
     expect(opened).toEqual(["sess-1"]);
@@ -94,7 +96,7 @@ describe("ProjectScreen", () => {
     await render({ conversations: [conversation({})], source: "local", truncated: false, warning: "The computer did not answer in time" });
     expect(container.textContent).toContain("Earlier conversations could not be loaded");
     expect(container.textContent).toContain("did not answer in time");
-    expect(container.querySelectorAll("li.card")).toHaveLength(1);
+    expect(container.querySelectorAll("li.row")).toHaveLength(1);
   });
 
   it("says when older conversations were left out", async () => {
