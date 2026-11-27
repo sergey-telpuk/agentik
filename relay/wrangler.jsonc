@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentik-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-22",
+
+  // RELAY_ID names this deployment. The device signs it as part of
+  // registration, so a signature captured here cannot be replayed against a
+  // different relay. Override it per environment.
+  "vars": {
+    "RELAY_ID": "agentik-relay-dev"
+  },
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "DEVICE",
+        "class_name": "DeviceRoom"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      // The SQLite-backed class is what the free plan offers. The relay
+      // keeps no application history in it: routes live in memory and in
+      // hibernation attachments only.
+      "new_sqlite_classes": ["DeviceRoom"]
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}

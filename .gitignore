@@ -11,3 +11,10 @@ identity.json
 
 # OS noise
 .DS_Store
+
+# Node
+node_modules/
+
+# Wrangler / Cloudflare local state
+.wrangler/
+.dev.vars
