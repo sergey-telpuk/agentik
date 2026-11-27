@@ -77,11 +77,11 @@ export function ComputersScreen({ api, persistence, onAdd, onOpen, onSettings }:
           {listing.computers.map((c) => (
             // The whole row is tappable with a pointer; keyboard and screen reader users reach the same
             // action through the two real buttons. Clicks on them bubble up to this one handler.
-            <li key={c.id} className="computer-row" onClick={() => onOpen(c)}>
-              <img className="computer-icon" src={agentikIcon} alt="" width={48} height={48} />
-              <button type="button" className="computer-row-main">
-                <span className="computer-name">{c.name}</span>
-                <span className="computer-id mono">{shortId(c.id)}</span>
+            <li key={c.id} className="row computer-row" onClick={() => onOpen(c)}>
+              <img className="row-icon computer-icon" src={agentikIcon} alt="" width={48} height={48} />
+              <button type="button" className="row-main computer-row-main">
+                <span className="row-title computer-name">{c.name}</span>
+                <span className="row-secondary computer-id mono">{shortId(c.id)}</span>
               </button>
               <button type="button" className="button button-primary button-pill" aria-label={`Open ${c.name}`}>
                 OPEN

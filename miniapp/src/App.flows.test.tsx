@@ -192,7 +192,8 @@ describe("App flows on mock data", () => {
     expect(find("Stop task").disabled).toBe(false);
     expect(find("Send").disabled).toBe(true);
     await advance(20_000);
-    expect(container.querySelector(".bubble-agent .chip-label")?.textContent).toBe("succeeded");
+    // The chip is only for a turn that runs or ended otherwise; a reply that succeeded has none.
+    expect(container.querySelector(".bubble-agent .chip")).toBeNull();
     expect(container.textContent).toContain("Added a /healthz route");
     expect(container.textContent).toContain("relay/src/index.ts");
     expect(container.textContent).not.toContain("Closing the app does not cancel the task");
@@ -281,7 +282,8 @@ describe("App flows on mock data", () => {
     await click("Deny", 10);
     expect(container.textContent).toContain("You denied this request.");
     await advance(5000);
-    expect(container.querySelector(".bubble-agent .chip-label")?.textContent).toBe("succeeded");
+    expect(container.querySelector(".bubble-agent .chip")).toBeNull();
+    expect(container.textContent).toContain("Show steps");
   });
 
   it("shows recovery_required with its explanation and no automatic retry", async () => {

@@ -94,8 +94,10 @@ export function Turn({ api, computerId, task, copyText, onTask, onReviewApproval
 
       <div className="bubble bubble-agent" role="group" aria-label="Agent reply">
         <div className="bubble-head">
-          <span className="event-who">Codex</span>
-          <StatusChip tone={status.tone} label={status.label} pulse={status.pulse} />
+          <span className="bubble-sender">Codex</span>
+          {/* A small chip while the turn runs. A turn that succeeded needs none; the reply speaks for itself.
+              Other endings keep their chip, because "cancelled" has no other sign in the bubble. */}
+          {task.state !== "succeeded" && <StatusChip tone={status.tone} label={status.label} pulse={status.pulse} />}
         </div>
 
         {!final && <p className="hint bubble-detail">{TASK_STATE_DESCRIPTION[task.state]}</p>}
