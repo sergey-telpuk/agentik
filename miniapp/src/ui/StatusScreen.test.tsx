@@ -180,4 +180,157 @@ describe("StatusScreen Noise wiring", () => {
     sendCipher?.free();
     recvCipher?.free();
   });
+
+  it("clears pending credentials and blocks task UI when computer rejects pairing", async () => {
+    const daemonKeys = await generateNoiseKeyPair();
+    const wire = validWire({ noise_public_key: encodeBase64Url(daemonKeys.publicKey) });
+    const parsed = parseInvitation(asJson(wire), NOW_MS);
+    if (!parsed.ok) throw new Error("invalid test wire");
+    const device = pinnedDeviceFromInvitation(parsed.value, NOW_S);
+
+    const noise = await loadFreshNoiseRuntime();
+    const hs = new noise.HandshakeState(NOISE_PROTOCOL_NAME, noise.constants.NOISE_ROLE_RESPONDER);
+    hs.Initialize(devicePrologue(parsed.value.deviceId), daemonKeys.privateKey, null, null);
+    let step = 1;
+    let sendCipher = null as NoiseCipherState | null;
+    let recvCipher = null as NoiseCipherState | null;
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    let socket: FakeSocket | null = null;
+    let clearedDeviceId: string | null = null;
+
+    const sendEncrypted = (msg: unknown): void => {
+      if (sendCipher === null) return;
+      const ct = sendCipher.EncryptWithAd(new Uint8Array(0), encoder.encode(JSON.stringify(msg)));
+      queueMicrotask(() => socket?.receive({ type: "frame", data: encodeBase64(ct) }));
+    };
+
+    const backend = new MemoryBackend("secure");
+    const store = await PinnedDeviceStore.open({ secure: backend, device: null });
+    await store.pin(device);
+
+    const services: AppServices = {
+      runtime: {
+        isMiniApp: false,
+        platformVersion: null,
+        rawInitData: () => null,
+        supportsMethod: () => false,
+        scanQr: () => Promise.resolve(null),
+      },
+      openStore: () => Promise.resolve(store),
+      openIdentityStore: () => PhoneIdentityStore.open({ secure: backend, device: null }),
+      createRelayClient: (d) =>
+        new RelayClient({
+          relayUrl: d.relayUrl,
+          deviceId: parsed.value.deviceId,
+          deviceIdText: d.deviceId,
+          createSocket: () => {
+            socket = new FakeSocket((outbound) => {
+              if (outbound["type"] === "attach") {
+                queueMicrotask(() => {
+                  socket?.receive({
+                    type: "attached",
+                    deviceId: d.deviceId,
+                    connectionId: "0123456789abcdef0123456789abcdef",
+                    devicePresent: true,
+                  });
+                });
+                return;
+              }
+              if (outbound["type"] === "frame" && typeof outbound["data"] === "string") {
+                const raw = decodeBase64(outbound["data"]);
+                if (raw === null) return;
+                if (step === 1) {
+                  hs.ReadMessage(raw, false, false);
+                  step = 3;
+                  const msg2 = hs.WriteMessage(null);
+                  queueMicrotask(() => socket?.receive({ type: "frame", data: encodeBase64(msg2) }));
+                } else if (step === 3) {
+                  hs.ReadMessage(raw, false, false);
+                  const [s, r] = hs.Split();
+                  sendCipher = s;
+                  recvCipher = r;
+                  step = 4;
+                } else if (recvCipher !== null) {
+                  const pt = recvCipher.DecryptWithAd(new Uint8Array(0), raw);
+                  const msg = JSON.parse(decoder.decode(pt)) as Record<string, unknown>;
+                  if (msg["method"] === "device.info") {
+                    sendEncrypted({
+                      v: 1,
+                      type: "response",
+                      request_id: msg["request_id"],
+                      ok: true,
+                      result: {
+                        device_id: d.deviceId,
+                        paired: false,
+                        pairing_state: "unpaired",
+                        capabilities: ["codex"],
+                      },
+                    });
+                  } else if (msg["method"] === "pair.submit") {
+                    sendEncrypted({
+                      v: 1,
+                      type: "response",
+                      request_id: msg["request_id"],
+                      ok: true,
+                      result: {
+                        state: "awaiting_local_approval",
+                        device_id: d.deviceId,
+                        verification_code: "11:22:33:44",
+                      },
+                    });
+                  }
+                }
+              }
+            });
+            queueMicrotask(() => socket?.onopen?.({}));
+            return socket;
+          },
+        }),
+      secureChannel: noiseChannelFactory,
+      now: () => NOW_MS,
+    };
+
+    await act(async () => {
+      root.render(
+        <StatusScreen
+          services={services}
+          device={device}
+          store={store}
+          pendingPairing={{
+            deviceId: device.deviceId,
+            invitationId: String(wire["invitation_id"]),
+            invitationSecret: String(wire["invitation_secret"]),
+          }}
+          onClearPendingPairing={(id) => {
+            clearedDeviceId = id;
+          }}
+          onBack={() => undefined}
+        />,
+      );
+    });
+
+    await settle(() => container.textContent?.includes("11:22:33:44") === true);
+
+    await act(async () => {
+      sendEncrypted({
+        v: 1,
+        type: "event",
+        event: "pair.updated",
+        data: { device_id: device.deviceId, state: "rejected" },
+      });
+    });
+
+    await settle(() => container.textContent?.includes("Pairing rejected by the computer") === true);
+    expect(clearedDeviceId).toBe(device.deviceId);
+    expect(container.textContent).not.toContain("Run task");
+    const listed = await store.list();
+    expect(listed.ok && listed.value[0]?.state).toBe("unconfirmed");
+
+    await act(async () => {
+      root.unmount();
+    });
+    sendCipher?.free();
+    recvCipher?.free();
+  });
 });

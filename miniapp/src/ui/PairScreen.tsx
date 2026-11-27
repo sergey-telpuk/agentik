@@ -7,12 +7,19 @@ import {
 } from "../pairing/invitation";
 import { pinnedDeviceFromInvitation } from "../pairing/pin";
 import type { AppServices } from "../services";
-import type { PinnedDeviceStore } from "../storage/pinnedDevices";
+import type { PinnedDevice, PinnedDeviceStore } from "../storage/pinnedDevices";
+
+/** Ephemeral in-memory credentials needed for the initial `pair.submit` RPC. Never persisted. */
+export interface PendingPairingCredentials {
+  readonly deviceId: string;
+  readonly invitationId: string;
+  readonly invitationSecret: string;
+}
 
 interface Props {
   readonly services: AppServices;
   readonly store: PinnedDeviceStore;
-  readonly onPinned: () => void;
+  readonly onPinned: (device: PinnedDevice, pending: PendingPairingCredentials) => void;
   readonly onCancel: () => void;
 }
 
@@ -55,11 +62,17 @@ export function PairScreen({ services, store, onPinned, onCancel }: Props) {
 
   async function pin(): Promise<void> {
     if (invitation === null) return;
-    const result = await store.pin(pinnedDeviceFromInvitation(invitation, Math.floor(services.now() / 1000)));
+    const inv = invitation;
+    const result = await store.pin(pinnedDeviceFromInvitation(inv, Math.floor(services.now() / 1000)));
     if (result.ok) {
+      const pending: PendingPairingCredentials = {
+        deviceId: inv.deviceIdText,
+        invitationId: encodeBase64Url(inv.invitationId),
+        invitationSecret: encodeBase64Url(inv.invitationSecret),
+      };
       setText("");
       setInvitation(null);
-      onPinned();
+      onPinned(result.value, pending);
     } else {
       setError(result.message);
     }

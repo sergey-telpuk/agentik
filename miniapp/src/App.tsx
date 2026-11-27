@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createDefaultServices, type AppServices } from "./services";
 import type { PinnedDevice, PinnedDeviceStore } from "./storage/pinnedDevices";
 import { DeviceListScreen } from "./ui/DeviceListScreen";
-import { PairScreen } from "./ui/PairScreen";
+import { PairScreen, type PendingPairingCredentials } from "./ui/PairScreen";
 import { StatusScreen } from "./ui/StatusScreen";
 
 type Screen =
@@ -22,6 +22,11 @@ export function App({ services: provided }: Props) {
   const [store, setStore] = useState<PinnedDeviceStore | null>(null);
   const [screen, setScreen] = useState<Screen>({ name: "devices" });
   const [refreshKey, setRefreshKey] = useState(0);
+  // Ephemeral one-time pairing credentials (id + secret) stay strictly in
+  // memory until submitted/confirmed; never written to persistent storage.
+  const [pendingPairingByDevice, setPendingPairingByDevice] = useState<
+    Readonly<Record<string, PendingPairingCredentials>>
+  >({});
 
   useEffect(() => {
     let cancelled = false;
@@ -33,6 +38,24 @@ export function App({ services: provided }: Props) {
     };
   }, [services]);
 
+  const handleClearPendingPairing = useCallback((deviceId: string) => {
+    setPendingPairingByDevice((prev) => {
+      if (!(deviceId in prev)) return prev;
+      const next = { ...prev };
+      delete next[deviceId];
+      return next;
+    });
+  }, []);
+
+  const handleConfirmed = useCallback((confirmed: PinnedDevice) => {
+    setRefreshKey((n) => n + 1);
+    setScreen((prev) =>
+      prev.name === "status" && prev.device.deviceId === confirmed.deviceId
+        ? { name: "status", device: confirmed }
+        : prev,
+    );
+  }, []);
+
   return (
     <main>
       <h1>Agentik</h1>
@@ -42,14 +65,23 @@ export function App({ services: provided }: Props) {
         <PairScreen
           services={services}
           store={store}
-          onPinned={() => {
+          onPinned={(pinnedDevice, pending) => {
+            setPendingPairingByDevice((prev) => ({ ...prev, [pinnedDevice.deviceId]: pending }));
             setRefreshKey((n) => n + 1);
             setScreen({ name: "devices" });
           }}
           onCancel={() => setScreen({ name: "devices" })}
         />
       ) : screen.name === "status" ? (
-        <StatusScreen services={services} device={screen.device} onBack={() => setScreen({ name: "devices" })} />
+        <StatusScreen
+          services={services}
+          device={screen.device}
+          store={store}
+          pendingPairing={pendingPairingByDevice[screen.device.deviceId] ?? null}
+          onConfirmed={handleConfirmed}
+          onClearPendingPairing={handleClearPendingPairing}
+          onBack={() => setScreen({ name: "devices" })}
+        />
       ) : (
         <DeviceListScreen
           store={store}
