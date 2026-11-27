@@ -8,7 +8,7 @@
   // registration, so a signature captured here cannot be replayed against a
   // different relay. Override it per environment.
   "vars": {
-    "RELAY_ID": "agentik-relay-dev"
+    "RELAY_ID": "agentik-relay"
   },
 
   "durable_objects": {
