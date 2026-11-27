@@ -344,6 +344,11 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		RelayURL:        normalizedRelay,
 		Identity:        id,
 		ExpectedRelayID: *relayID,
+		// Being replaced means another daemon is running with the same
+		// identity. Racing it back would have the two evict each other in a
+		// loop and exhaust the relay's registration limit, so this one stops
+		// and says which is left.
+		StopOnReplaced: true,
 		Handlers: transport.Handlers{
 			OnStatus: func(st transport.Status) {
 				if st.LastError != "" {
@@ -474,6 +479,13 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 			return nil
 		case tErr := <-transportErrCh:
 			if tErr != nil && !errors.Is(tErr, context.Canceled) {
+				// Say what happened in the terms the user is in: they started
+				// it twice, and the one they started last is the live one.
+				if strings.Contains(tErr.Error(), "route replaced") {
+					logLine("Another Agentik is now running for this computer, so this one stopped.")
+					logLine("Only one can be connected at a time; the one you started last is the live one.")
+					return nil
+				}
 				return tErr
 			}
 			return nil
