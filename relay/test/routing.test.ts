@@ -332,10 +332,12 @@ describe("limits", () => {
     phone.close();
   });
 
-  it("bounds the number of clients attached to one device", async () => {
+  it("refuses a new client when every client slot is busy", async () => {
     const device = await createDevice();
     const daemon = await connectRegisteredDevice(device);
 
+    // Freshly attached clients are not idle, so none of them may be evicted
+    // for the newcomer.
     const clients: TestPeer[] = [];
     for (let i = 0; i < LIMITS.maxClients; i++) {
       clients.push(await connectAttachedClient(device.deviceIdText, device.deviceId));
@@ -351,6 +353,7 @@ describe("limits", () => {
     const reply = await extra.next();
     if (reply.type !== "error") throw new Error(`expected error, got ${reply.type}`);
     expect(reply.code).toBe("too_many_connections");
+    for (const c of clients) expect(c.closed).toBeNull();
 
     daemon.close();
     for (const c of clients) c.close();

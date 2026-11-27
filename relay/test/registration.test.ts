@@ -17,7 +17,6 @@ import {
   createDevice,
   expectMessage,
 } from "./helpers";
-import { encodeBase64 } from "../src/protocol";
 
 describe("connection setup", () => {
   it("issues a challenge bound to the connection", async () => {
@@ -238,29 +237,46 @@ describe("device registration", () => {
     const device = await createDevice();
     const attacker = await createDevice();
     const incumbent = await connectRegisteredDevice(device);
+    const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    await expectMessage(incumbent, "peer_state");
 
-    // A failed registration attempt on the same route.
-    const intruder = await TestPeer.connect(device.deviceIdText);
-    const challenge = await intruder.challenge();
-    intruder.send(await buildRegister(device, { challenge, signWith: attacker.privateKey }));
-    const rejection = await intruder.next();
-    expect(rejection.type).toBe("error");
+    // Every way a registration on this route can fail. None of them may
+    // touch the registered connection.
+    const elsewhere = await TestPeer.connect(device.deviceIdText);
+    const foreignChallenge = await elsewhere.challenge();
+    const past = Math.floor(Date.now() / 1000) - 1;
+    const attempts: [string, (challenge: Uint8Array) => Promise<string>][] = [
+      ["foreign signature", (c) =>
+        buildRegister(device, { challenge: c, signWith: attacker.privateKey })],
+      ["garbage signature", (c) =>
+        buildRegister(device, { challenge: c, forgedSignature: new Uint8Array(64).fill(1) })],
+      ["mismatched device id", (c) =>
+        buildRegister(attacker, { challenge: c, deviceId: device.deviceId })],
+      ["replayed challenge", () => buildRegister(device, { challenge: foreignChallenge })],
+      ["expired", (c) => buildRegister(device, { challenge: c, expiresAt: past })],
+      ["other relay", (c) => buildRegister(device, { challenge: c, relayId: "elsewhere" })],
+    ];
 
-    // The incumbent must still be able to carry traffic. A client attaching
-    // now should be told the device is present.
-    const client = await TestPeer.connect(device.deviceIdText);
-    await client.challenge();
-    client.sendJson({
-      type: "attach",
-      version: 1,
-      device_id: encodeBase64(device.deviceId),
-    });
-    const attached = await client.next();
-    if (attached.type !== "attached") throw new Error(`expected attached, got ${attached.type}`);
-    expect(attached.devicePresent).toBe(true);
+    for (const [name, build] of attempts) {
+      const intruder = await TestPeer.connect(device.deviceIdText);
+      const challenge = await intruder.challenge();
+      intruder.send(await build(challenge));
+      const rejection = await intruder.next();
+      expect(rejection.type, name).toBe("error");
+      expect((await intruder.waitClosed()).code, name).toBe(4001);
+    }
+
+    // The incumbent was never closed or replaced and still carries traffic
+    // both ways.
+    expect(incumbent.closed).toBeNull();
+    phone.sendFrame(new Uint8Array([1]));
+    expect((await expectMessage(incumbent, "frame")).connectionId).toBe(phone.connectionId);
+    incumbent.sendFrame(new Uint8Array([2]), phone.connectionId);
+    await expectMessage(phone, "frame");
 
     incumbent.close();
-    client.close();
+    phone.close();
+    elsewhere.close();
   });
 
   it("rejects a validly signed registration for another device's route", async () => {
@@ -293,35 +309,50 @@ describe("device registration", () => {
   it("replaces an older connection when the same key re-registers", async () => {
     const device = await createDevice();
     const first = await connectRegisteredDevice(device);
+    const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    await expectMessage(first, "peer_state");
 
     // A reconnect after a network change proves the same key and takes over
-    // the route.
-    const second = await connectRegisteredDevice(device);
+    // the route. It learns about the client already attached.
+    const second = await TestPeer.connect(device.deviceIdText);
+    const challenge = await second.challenge();
+    second.send(await buildRegister(device, { challenge }));
+    const registered = await expectMessage(second, "registered");
+    expect(registered.connections).toEqual([phone.connectionId]);
 
-    const client = await TestPeer.connect(device.deviceIdText);
-    await client.challenge();
-    client.sendJson({
-      type: "attach",
-      version: 1,
-      device_id: encodeBase64(device.deviceId),
-    });
-    const attached = await client.next();
-    if (attached.type !== "attached") throw new Error("expected attached");
-    expect(attached.devicePresent).toBe(true);
+    expect((await first.waitClosed()).code).toBe(4000);
 
-    first.close();
+    // The client is told a new device connection is in place, and its
+    // frames now reach only the new connection.
+    expect(await expectMessage(phone, "peer_state")).toEqual({ type: "peer_state", present: true });
+    phone.sendFrame(new Uint8Array([0x5a]));
+    expect((await expectMessage(second, "frame")).connectionId).toBe(phone.connectionId);
+    await first.expectSilence();
+
     second.close();
-    client.close();
+    phone.close();
   });
 
   it("refuses a second registration on one connection", async () => {
     const device = await createDevice();
-    const peer = await connectRegisteredDevice(device);
+    const peer = await TestPeer.connect(device.deviceIdText);
+    const challenge = await peer.challenge();
+    const register = await buildRegister(device, { challenge });
+    peer.send(register);
+    await expectMessage(peer, "registered");
 
-    peer.sendJson({ type: "register", version: 1, role: "device", relay_id: RELAY_ID });
-    const reply = await peer.next();
-    if (reply.type !== "error") throw new Error(`expected error, got ${reply.type}`);
+    // A complete, validly signed registration, so the only reason left to
+    // refuse it is that this connection already registered.
+    peer.send(register);
+    const reply = await expectMessage(peer, "error");
     expect(reply.code).toBe("bad_request");
+    expect(reply.message).toContain("already registered");
+
+    // The connection is still the registered device.
+    expect(peer.closed).toBeNull();
+    const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    expect((await expectMessage(peer, "peer_state")).connectionId).toBe(phone.connectionId);
     peer.close();
+    phone.close();
   });
 });
