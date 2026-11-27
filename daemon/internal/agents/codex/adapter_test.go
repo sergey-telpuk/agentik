@@ -460,7 +460,6 @@ func TestRealCodexAppServerTurn(t *testing.T) {
 	}
 }
 
-
 // TestRealCodexAppServerContinuation starts a thread, then resumes it with a
 // second turn and checks that the agent remembers the first one. It runs only
 // when AGENTIK_TEST_REAL_CODEX_TURN=1 is set.

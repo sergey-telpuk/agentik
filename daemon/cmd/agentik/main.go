@@ -30,6 +30,7 @@ import (
 	"github.com/sergey-telpuk/agentik/daemon/internal/projects"
 	"github.com/sergey-telpuk/agentik/daemon/internal/runtime"
 	"github.com/sergey-telpuk/agentik/daemon/internal/storage"
+	"github.com/sergey-telpuk/agentik/daemon/internal/terminal"
 	"github.com/sergey-telpuk/agentik/daemon/internal/transport"
 	"github.com/sergey-telpuk/agentik/daemon/internal/webrtc"
 )
@@ -294,6 +295,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 			Projects: cat,
 			Agents:   map[string]codex.Adapter{codex.AgentName: codexAdapter},
 			Catalog:  catalog,
+			Terminal: terminal.Config{Logf: logLine},
 		},
 		acceptor,
 		acceptor.Prologue,

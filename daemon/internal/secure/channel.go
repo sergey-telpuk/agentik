@@ -63,6 +63,10 @@ type ManagedSession struct {
 
 	mu     sync.RWMutex
 	closed bool
+
+	// sendMu keeps encryption and sending in one order: the peer rejects a
+	// frame whose nonce arrives out of order.
+	sendMu sync.Mutex
 }
 
 // PeerStatic returns a copy of the peer's verified Noise static public key.
@@ -82,6 +86,8 @@ func (s *ManagedSession) Send(ctx context.Context, plaintext []byte) error {
 	if len(plaintext) > MaxRelayPlaintextSize {
 		return fmt.Errorf("%w: %d bytes (limit %d)", ErrPayloadTooLarge, len(plaintext), MaxRelayPlaintextSize)
 	}
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
 	ct, err := s.session.Encrypt(plaintext)
 	if err != nil {
 		return err

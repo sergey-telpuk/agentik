@@ -25,10 +25,10 @@ import (
 
 // fakeAdapter implements codex.Adapter deterministically for runtime tests.
 type fakeAdapter struct {
-	status       codex.AgentStatus
-	launchCount  atomic.Int64
-	mu           sync.Mutex
-	handler      func(ctx context.Context, req codex.StartTurnRequest, cb codex.TurnCallbacks, turn *fakeTurn)
+	status      codex.AgentStatus
+	launchCount atomic.Int64
+	mu          sync.Mutex
+	handler     func(ctx context.Context, req codex.StartTurnRequest, cb codex.TurnCallbacks, turn *fakeTurn)
 }
 
 func (f *fakeAdapter) Name() string { return codex.AgentName }

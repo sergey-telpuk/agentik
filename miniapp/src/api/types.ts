@@ -393,4 +393,47 @@ export interface AgentikApi {
    * replaced with a new one; a valid key is kept.
    */
   clearLocalData(): Promise<ApiResult<ClearLocalDataResult>>;
+
+  /**
+   * Opens a login shell in a project folder on the computer (AGENTIK.md
+   * section 8.1). The session ends when the secure session closes.
+   */
+  openTerminal(computerId: string, input: OpenTerminalInput): Promise<ApiResult<TerminalSession>>;
+  /** Sends typed bytes, at most `MAX_TERMINAL_INPUT_BYTES` per call. */
+  sendTerminalInput(computerId: string, sessionId: string, data: Uint8Array): Promise<ApiResult<null>>;
+  resizeTerminal(computerId: string, sessionId: string, cols: number, rows: number): Promise<ApiResult<null>>;
+  /** Ends the session; its processes are gone when this resolves. */
+  closeTerminal(computerId: string, sessionId: string): Promise<ApiResult<TerminalClosed>>;
+  /**
+   * Delivers the session's output in order, then `onClosed` once. Output is
+   * untrusted terminal data: it goes to the terminal emulator, never to HTML.
+   */
+  streamTerminal(computerId: string, sessionId: string, handlers: TerminalStreamHandlers): Unsubscribe;
+}
+
+/** Upper bound on one `sendTerminalInput` call, checked on both sides. */
+export const MAX_TERMINAL_INPUT_BYTES = 4096;
+
+export interface OpenTerminalInput {
+  readonly projectId: string;
+  /** One line typed into the shell after it starts, for example `codex`. */
+  readonly command?: string;
+  readonly cols: number;
+  readonly rows: number;
+}
+
+export interface TerminalSession {
+  readonly sessionId: string;
+  readonly projectId: string;
+}
+
+export interface TerminalClosed {
+  /** `exited`, `closed`, `idle`, `disconnected`, `revoked`, `shutdown`, or `lost` when the phone lost track of it. */
+  readonly reason: string;
+  readonly exitCode: number | null;
+}
+
+export interface TerminalStreamHandlers {
+  readonly onOutput: (data: Uint8Array) => void;
+  readonly onClosed: (closed: TerminalClosed) => void;
 }

@@ -21,7 +21,7 @@ import (
 )
 
 type fakeRelay struct {
-	server *httptest.Server
+	server  *httptest.Server
 	relayID string
 
 	mu            sync.Mutex

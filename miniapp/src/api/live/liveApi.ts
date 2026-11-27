@@ -48,6 +48,7 @@ import {
   type TaskUpdate,
 } from "../types";
 import { ConnectAttempt, type ComputerOutcome, type OpenLink, type PendingPairing } from "./connection";
+import { createLiveTerminal } from "./terminal";
 import {
   agentsFromInfo,
   apiErrorFrom,
@@ -271,6 +272,7 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
 
   return {
     backend: "live",
+    ...createLiveTerminal({ session }),
 
     async listComputers() {
       const listed = await options.store.list();

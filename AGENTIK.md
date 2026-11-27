@@ -383,6 +383,32 @@ A permitted project and a Git worktree are not a sandbox. If the agent runs a sh
 
 Agent output is treated as untrusted content: HTML and Markdown must not execute code in the Mini App. Server messages are likewise not used as launch commands or shell parameters.
 
+### 8.1. Remote terminal
+
+This deliberately reverses the earlier "no shell from the phone" stance: a paired phone can open a full interactive shell on the computer, with no per-command or per-session confirmation, so a paired phone is as powerful as the user at the keyboard. The shell runs in a chosen project directory and the user can run any command there, including an interactive agent such as `codex`.
+
+| Method | Request | Result |
+| --- | --- | --- |
+| `terminal.open` | `project_id`, optional `command`, `cols`, `rows` | `session_id`, `project_id`, `cols`, `rows` |
+| `terminal.input` | `session_id`, `data` (standard base64, at most 4 KiB decoded) | `session_id`, `bytes` |
+| `terminal.resize` | `session_id`, `cols`, `rows` | `session_id`, `cols`, `rows` |
+| `terminal.read` | `session_id`, `after_seq`, optional `wait_ms` (at most 25000) | `session_id`, `chunks` (`seq`, base64 `data`), `next_seq`, `closed`, `reason`, `exit_code`, `truncated` |
+| `terminal.close` | `session_id` | `session_id`, `closed`, `reason`, `exit_code` |
+
+Output is pulled, like `events.resume`, rather than pushed. `terminal.read` acknowledges every chunk up to `after_seq`, returns the chunks after it (at most 16 KiB of raw output and 64 chunks, so a response always fits one frame), and with nothing to return waits up to `wait_ms` for output; a newer read on the same session ends an older waiting one. A lost response is recovered by repeating the read with the same cursor. `closed` is set once the session has ended and no output is left; `reason` is `exited`, `closed`, `idle`, `disconnected`, `revoked`, or `shutdown`. The optional `command` (one printable line, at most 1 KiB) is typed into the shell after it starts, so it runs exactly as if the user typed it.
+
+Safety baselines, all mandatory:
+
+- Terminal methods pass the same per-request paired-phone check as every other command; an unpaired, pending, or revoked phone gets `unauthorized` and no shell. A session belongs to the Noise channel that opened it; another channel, even of the same phone, gets `not_found`.
+- Closing that channel (relay disconnect, phone reconnect) or revoking the phone ends every terminal session of that phone and frees its PTY. Revocation waits until the processes are gone.
+- The working directory is the symlink-resolved root of a project from the local catalogue (`-project id=path`). `terminal.open` accepts no path, shell, or environment parameter.
+- Output is buffered per session up to 256 KiB of unacknowledged data. When the phone does not keep up, the daemon stops reading the PTY and the kernel blocks the shell, so memory stays bounded. Input goes through a bounded queue; a full queue answers `terminal_busy` instead of blocking the daemon. Requests that may wait (`terminal.read` with `wait_ms`, `terminal.close`) are answered from a goroutine so they never hold up other frames.
+- Each session is a new OS session and process group. Ending it sends SIGHUP to the shell's group and to the terminal's foreground group, SIGKILL after one second, and closes the PTY. Daemon shutdown ends every session first. Jobs the user explicitly detached into another process group (`nohup`, `disown`) are not tracked.
+- Only lifecycle facts are logged: session id, project id, pid, close reason, and exit code. Typed input and output are never logged or stored.
+- A session with no input and no output for 30 minutes is closed (`terminal.IdleTimeout`). Waiting reads do not count as activity.
+- The shell is the user's login shell (`SHELL`, falling back to `/bin/zsh`), started as a login shell under the daemon's own OS user with the daemon's environment, plus `TERM=xterm-256color`. Nothing escalates privileges.
+- At most 4 running sessions per channel and 16 per computer.
+
 ## 9. Resources and relay protection
 
 The following are required before a public launch:
