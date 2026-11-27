@@ -164,7 +164,7 @@ func newHarness(t *testing.T, adapter *fakeAdapter, opts ...func(*runtime.Config
 		o(&rtCfg)
 	}
 
-	hub, err := runtime.NewHub(id, pairSvc, rtCfg, sender, func(connID string, err error) {
+	hub, err := runtime.NewHub(id, pairSvc, rtCfg, sender, devicePrologue(id), func(connID string, err error) {
 		t.Logf("secure error [%s]: %v", connID, err)
 	})
 	if err != nil {
@@ -173,6 +173,12 @@ func newHarness(t *testing.T, adapter *fakeAdapter, opts ...func(*runtime.Config
 	t.Cleanup(hub.Close)
 	h.hub = hub
 	return h
+}
+
+// devicePrologue gives every connection the base prologue. The WebRTC
+// acceptor supplies a fingerprint-bound one in production.
+func devicePrologue(id *identity.Identity) func(string) ([]byte, error) {
+	return func(string) ([]byte, error) { return secure.DevicePrologue(id.DeviceID()), nil }
 }
 
 type frameSenderFunc func(ctx context.Context, connID string, data []byte) error
@@ -775,7 +781,7 @@ func TestMissingCodexAndCrashRecoveryRequired(t *testing.T) {
 			}
 			return runtime.ErrSimulatedCrash
 		},
-	}, frameSenderFunc(func(_ context.Context, _ string, _ []byte) error { return nil }), nil)
+	}, frameSenderFunc(func(_ context.Context, _ string, _ []byte) error { return nil }), devicePrologue(id), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

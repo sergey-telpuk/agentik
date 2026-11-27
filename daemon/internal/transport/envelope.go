@@ -1,10 +1,13 @@
 // Package transport manages the daemon's outbound WebSocket connection to the
 // Agentik relay.
 //
-// It owns only the outer relay envelope: connection setup, challenge-response
-// route registration, keepalive pings, exponential-backoff reconnection, and
-// per-connectionId frame forwarding. It never reads or interprets frame bytes,
-// which carry Noise handshake and encrypted transport messages.
+// The relay is used for signaling only. This package owns the outer relay
+// envelope: connection setup, challenge-response route registration,
+// keepalive pings, exponential-backoff reconnection, and per-connectionId
+// forwarding of WebRTC signaling payloads (SDP offers and answers, ICE
+// candidates, the ICE server list). It never reads or interprets those bytes,
+// and it has no way to send application data: Noise and RPC frames travel
+// over the WebRTC DataChannel (package webrtc).
 package transport
 
 import (
@@ -16,8 +19,21 @@ import (
 	"strings"
 )
 
-// MaxFrameBytes matches the relay's maximum opaque frame payload size (32 KiB).
-const MaxFrameBytes = 32 * 1024
+// MaxSignalBytes matches the relay's maximum signaling payload size (32 KiB).
+const MaxSignalBytes = 32 * 1024
+
+// Signal kinds the relay forwards (relay/src/messages.ts). A device sends only
+// the kinds in DeviceSignalKinds and receives only the ones a client may send.
+const (
+	SignalOffer      = "offer"
+	SignalAnswer     = "answer"
+	SignalICE        = "ice"
+	SignalICEServers = "ice_servers"
+)
+
+// DeviceSignalKinds lists what the daemon may send; SendSignal refuses any
+// other kind before it reaches the wire.
+var DeviceSignalKinds = []string{SignalAnswer, SignalICE, SignalICEServers}
 
 // KeepalivePing is the exact JSON text frame the Cloudflare Durable Object
 // hibernation auto-response matches without waking the object or counting
@@ -33,15 +49,16 @@ const (
 )
 
 var (
-	// ErrNotConnected is returned when SendFrame is called while the relay
-	// route is not registered. Frames are never queued across disconnects
-	// because a new socket requires a fresh Noise handshake.
+	// ErrNotConnected is returned when SendSignal is called while the relay
+	// route is not registered. Signals are never queued across disconnects.
 	ErrNotConnected = errors.New("transport: relay is not connected")
-	// ErrFrameEmpty is returned when sending an empty payload.
-	ErrFrameEmpty = errors.New("transport: frame payload is empty")
-	// ErrFrameTooLarge is returned when a frame exceeds MaxFrameBytes.
-	ErrFrameTooLarge = errors.New("transport: frame exceeds maximum payload size")
-	// ErrInvalidConnectionID is returned when a device frame omits or passes a
+	// ErrSignalEmpty is returned when sending an empty payload.
+	ErrSignalEmpty = errors.New("transport: signal payload is empty")
+	// ErrSignalTooLarge is returned when a signal exceeds MaxSignalBytes.
+	ErrSignalTooLarge = errors.New("transport: signal exceeds maximum payload size")
+	// ErrSignalKind is returned when a signal kind is not one a device may send.
+	ErrSignalKind = errors.New("transport: signal kind is not allowed for a device")
+	// ErrInvalidConnectionID is returned when a device signal omits or passes a
 	// malformed relay connection ID.
 	ErrInvalidConnectionID = errors.New("transport: invalid connection id")
 )
@@ -66,8 +83,9 @@ type outboundRegister struct {
 	Signature         string `json:"signature"`
 }
 
-type outboundFrame struct {
+type outboundSignal struct {
 	Type         string `json:"type"`
+	Kind         string `json:"kind"`
 	Data         string `json:"data"`
 	ConnectionID string `json:"connection_id"`
 }
@@ -80,6 +98,7 @@ type inboundEnvelope struct {
 	DeviceID     string   `json:"deviceId"`
 	Connections  []string `json:"connections"`
 	Present      *bool    `json:"present"`
+	Kind         string   `json:"kind"`
 	Data         string   `json:"data"`
 	ConnectionID string   `json:"connectionId"`
 	Code         string   `json:"code"`
