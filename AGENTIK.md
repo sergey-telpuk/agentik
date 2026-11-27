@@ -250,6 +250,8 @@ A draft example of an inner command, not a finished public API:
 | `events.resume` | Replaying events after a sequence number |
 | `changes.get` | A bounded view of the resulting changes |
 
+A session maps to one agent thread. `task.start` with `session_id: null` creates a session and a new thread; `task.start` with an existing `session_id` (it must belong to the same project and agent) runs the next turn on that thread through `thread/resume`. A continuation is deduplicated and checked for conflicts like any other `task.start`, and it is rejected with `project_busy` while another turn is active in the project. `session.open` with an existing `session_id` returns the session's turns (`tasks`, oldest first, bounded to fit one frame, with `tasks_truncated` when older turns were left out), so a client can render the conversation after a reconnect.
+
 Method names and the JSON Schema are fixed before clients are implemented. An unknown version, method, extra dangerous parameters, or exceeded limits produce an explicit error.
 
 ## 7. Tasks, deduplication, and recovery

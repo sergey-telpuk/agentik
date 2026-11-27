@@ -32,6 +32,12 @@ const (
 	maxEventsPageBytes  = 20 * 1024
 	maxDiffReturnBytes  = 24 * 1024
 	maxResultFieldBytes = 20 * 1024
+
+	// session.open returns the turns of a session inline, so the listing is
+	// bounded well below the 32 KiB frame limit.
+	maxSessionTurns         = 50
+	maxSessionTurnsBytes    = 24 * 1024
+	maxSessionTurnTextBytes = 6 * 1024
 )
 
 // EventSink pushes asynchronous inner JSON events (such as session.event or
@@ -620,11 +626,18 @@ func (s *Service) handleSessionOpen(ctx context.Context, sess *secure.ManagedSes
 			s.sendError(ctx, sess, req.RequestID, "bad_request", "session does not match project or agent")
 			return
 		}
+		turns, truncated, err := s.sessionTurns(ctx, params.SessionID)
+		if err != nil {
+			s.sendError(ctx, sess, req.RequestID, "internal", "failed to load session turns")
+			return
+		}
 		s.sendResult(ctx, sess, req.RequestID, SessionOpenResult{
-			SessionID: params.SessionID,
-			ProjectID: pid,
-			Agent:     adp,
-			LastSeq:   lastSeq,
+			SessionID:      params.SessionID,
+			ProjectID:      pid,
+			Agent:          adp,
+			LastSeq:        lastSeq,
+			Tasks:          turns,
+			TasksTruncated: truncated,
 		})
 		return
 	}
@@ -649,14 +662,92 @@ func (s *Service) handleSessionOpen(ctx context.Context, sess *secure.ManagedSes
 		ProjectID: proj.ID,
 		Agent:     agentName,
 		LastSeq:   0,
+		Tasks:     []TaskView{},
 	})
 }
 
+// SessionOpenResult is the result of session.open. Tasks are the turns of the
+// session, oldest first, so a client can render the conversation after a
+// reconnect without knowing task ids in advance.
 type SessionOpenResult struct {
 	SessionID string `json:"session_id"`
 	ProjectID string `json:"project_id"`
 	Agent     string `json:"agent"`
 	LastSeq   int64  `json:"last_seq"`
+	// Tasks holds the most recent turns that fit the frame budget, oldest
+	// first. Prompt and result text are bounded per entry; task.get returns
+	// the full stored text of one turn.
+	Tasks []TaskView `json:"tasks"`
+	// TasksTruncated is true when older turns of the session were left out.
+	TasksTruncated bool `json:"tasks_truncated,omitempty"`
+}
+
+// sessionTurns loads the newest turns of a session within the frame budget
+// and returns them oldest first.
+func (s *Service) sessionTurns(ctx context.Context, sessionID string) ([]TaskView, bool, error) {
+	tx, err := s.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM tasks WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+		sessionID, maxSessionTurns+1,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, false, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, false, err
+	}
+	rows.Close()
+
+	truncated := len(ids) > maxSessionTurns
+	if truncated {
+		ids = ids[:maxSessionTurns]
+	}
+
+	newestFirst := make([]TaskView, 0, len(ids))
+	budget := maxSessionTurnsBytes
+	for _, id := range ids {
+		view, err := s.loadTaskTx(ctx, tx, id)
+		if err != nil {
+			return nil, false, err
+		}
+		view.Prompt = truncateUTF8(view.Prompt, maxSessionTurnTextBytes)
+		view.ResultText = truncateUTF8(view.ResultText, maxSessionTurnTextBytes)
+		view.ErrorMessage = truncateUTF8(view.ErrorMessage, maxSessionTurnTextBytes)
+		raw, err := json.Marshal(view)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(raw) > budget {
+			truncated = true
+			break
+		}
+		budget -= len(raw)
+		newestFirst = append(newestFirst, view)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+
+	turns := make([]TaskView, 0, len(newestFirst))
+	for i := len(newestFirst) - 1; i >= 0; i-- {
+		turns = append(turns, newestFirst[i])
+	}
+	return turns, truncated, nil
 }
 
 func (s *Service) handleTaskStart(ctx context.Context, sess *secure.ManagedSession, client *pairing.TrustedClient, req InboundRequest) {

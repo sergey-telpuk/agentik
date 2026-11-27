@@ -367,3 +367,42 @@ func TestRealCodexAppServerTurn(t *testing.T) {
 	}
 }
 
+
+// TestRealCodexAppServerContinuation starts a thread, then resumes it with a
+// second turn and checks that the agent remembers the first one. It runs only
+// when AGENTIK_TEST_REAL_CODEX_TURN=1 is set.
+func TestRealCodexAppServerContinuation(t *testing.T) {
+	if os.Getenv("AGENTIK_TEST_REAL_CODEX_TURN") != "1" {
+		t.Skip("set AGENTIK_TEST_REAL_CODEX_TURN=1 to run a live continuation against local codex")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	adapter := NewAdapter(Config{})
+	run := func(threadID, prompt string) TurnResult {
+		t.Helper()
+		turn, err := adapter.StartTurn(ctx, StartTurnRequest{ProjectRoot: dir, ThreadID: threadID, Prompt: prompt}, TurnCallbacks{
+			OnEvent: func(Event) {},
+		})
+		if err != nil {
+			t.Fatalf("StartTurn(thread=%q): %v", threadID, err)
+		}
+		return turn.Wait()
+	}
+
+	first := run("", "Remember the code word PINEAPPLE-42. Reply with exactly OK and do not run any shell commands.")
+	if first.Status != OutcomeSucceeded || first.ThreadID == "" {
+		t.Fatalf("first turn: %+v", first)
+	}
+	second := run(first.ThreadID, "What was the code word I asked you to remember? Reply with the word only and do not run any shell commands.")
+	if second.Status != OutcomeSucceeded {
+		t.Fatalf("second turn: %+v", second)
+	}
+	if second.ThreadID != first.ThreadID {
+		t.Fatalf("continuation changed thread: %q -> %q", first.ThreadID, second.ThreadID)
+	}
+	if !strings.Contains(strings.ToUpper(second.ResultText), "PINEAPPLE-42") {
+		t.Fatalf("agent did not remember the first turn: %q", second.ResultText)
+	}
+}
