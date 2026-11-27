@@ -216,9 +216,12 @@ export class TestPeer {
     this.#socket.send(data as unknown as ArrayBufferView);
   }
 
-  /** Sends an opaque frame, addressed to a client connection when given. */
-  sendFrame(data: Uint8Array, connectionId?: string): void {
-    const message: Record<string, unknown> = { type: "frame", data: encodeBase64(data) };
+  /**
+   * Sends an opaque signaling payload, addressed to a client connection when
+   * given. `ice` is the one kind both roles may send.
+   */
+  sendSignal(data: Uint8Array, connectionId?: string, kind = "ice"): void {
+    const message: Record<string, unknown> = { type: "signal", kind, data: encodeBase64(data) };
     if (connectionId !== undefined) message["connection_id"] = connectionId;
     this.sendJson(message);
   }

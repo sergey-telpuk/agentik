@@ -269,10 +269,10 @@ describe("device registration", () => {
     // The incumbent was never closed or replaced and still carries traffic
     // both ways.
     expect(incumbent.closed).toBeNull();
-    phone.sendFrame(new Uint8Array([1]));
-    expect((await expectMessage(incumbent, "frame")).connectionId).toBe(phone.connectionId);
-    incumbent.sendFrame(new Uint8Array([2]), phone.connectionId);
-    await expectMessage(phone, "frame");
+    phone.sendSignal(new Uint8Array([1]));
+    expect((await expectMessage(incumbent, "signal")).connectionId).toBe(phone.connectionId);
+    incumbent.sendSignal(new Uint8Array([2]), phone.connectionId);
+    await expectMessage(phone, "signal");
 
     incumbent.close();
     phone.close();
@@ -297,8 +297,8 @@ describe("device registration", () => {
     expect((await intruder.waitClosed()).code).toBe(4001);
 
     // The real daemon still owns the route and still carries traffic.
-    phone.sendFrame(new Uint8Array([9]));
-    const frame = await expectMessage(incumbent, "frame");
+    phone.sendSignal(new Uint8Array([9]));
+    const frame = await expectMessage(incumbent, "signal");
     expect(frame.connectionId).toBe(phone.connectionId);
     expect(incumbent.closed).toBeNull();
 
@@ -325,8 +325,8 @@ describe("device registration", () => {
     // The client is told a new device connection is in place, and its
     // frames now reach only the new connection.
     expect(await expectMessage(phone, "peer_state")).toEqual({ type: "peer_state", present: true });
-    phone.sendFrame(new Uint8Array([0x5a]));
-    expect((await expectMessage(second, "frame")).connectionId).toBe(phone.connectionId);
+    phone.sendSignal(new Uint8Array([0x5a]));
+    expect((await expectMessage(second, "signal")).connectionId).toBe(phone.connectionId);
     await first.expectSilence();
 
     second.close();

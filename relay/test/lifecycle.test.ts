@@ -119,8 +119,8 @@ describe("challenge deadline", () => {
     await editSockets(device, (s) => ({ ...s, challengeExpiresAt: Date.now() - 1 }));
     await runDurableObjectAlarm(roomFor(device));
 
-    phone.sendFrame(new Uint8Array([1]));
-    expect((await expectMessage(daemon, "frame")).connectionId).toBe(phone.connectionId);
+    phone.sendSignal(new Uint8Array([1]));
+    expect((await expectMessage(daemon, "signal")).connectionId).toBe(phone.connectionId);
     daemon.close();
     phone.close();
   });
@@ -257,16 +257,16 @@ describe("eviction under slot pressure", () => {
     // Malformed and refused messages do not count as activity...
     junk.send("{}");
     expect((await expectMessage(junk, "error")).code).toBe("bad_request");
-    junk.sendFrame(new Uint8Array([1]), "0".repeat(32));
+    junk.sendSignal(new Uint8Array([1]), "0".repeat(32));
     expect((await expectMessage(junk, "error")).code).toBe("bad_request");
 
     // ...while forwarded frames do, in either direction.
-    sender.sendFrame(new Uint8Array([2]));
-    expect((await expectMessage(daemon, "frame")).connectionId).toBe(sender.connectionId);
-    daemon.sendFrame(new Uint8Array([3]), receiver.connectionId);
-    await expectMessage(receiver, "frame");
-    other.sendFrame(new Uint8Array([4]));
-    expect((await expectMessage(daemon, "frame")).connectionId).toBe(other.connectionId);
+    sender.sendSignal(new Uint8Array([2]));
+    expect((await expectMessage(daemon, "signal")).connectionId).toBe(sender.connectionId);
+    daemon.sendSignal(new Uint8Array([3]), receiver.connectionId);
+    await expectMessage(receiver, "signal");
+    other.sendSignal(new Uint8Array([4]));
+    expect((await expectMessage(daemon, "signal")).connectionId).toBe(other.connectionId);
 
     const newcomer = await connectAttachedClient(device.deviceIdText, device.deviceId);
 

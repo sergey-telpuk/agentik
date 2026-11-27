@@ -19,7 +19,7 @@ import { LIMITS } from "../src/limits";
 import { KEEPALIVE_PING, maxMessageLength } from "../src/messages";
 import { decodeBase64, encodeBase64 } from "../src/protocol";
 
-describe("frame routing", () => {
+describe("signal routing", () => {
   it("forwards frames between a device and a client unchanged", async () => {
     const device = await createDevice();
     const daemon = await connectRegisteredDevice(device);
@@ -30,19 +30,19 @@ describe("frame routing", () => {
     expect(presence.present).toBe(true);
     expect(presence.connectionId).toBe(phone.connectionId);
 
-    // A Noise ciphertext is arbitrary bytes, including non-UTF8 sequences,
+    // A signaling payload is arbitrary bytes, including non-UTF8 sequences,
     // so the relay must not transform them in any way.
     const payload = new Uint8Array([0x00, 0xff, 0x80, 0x7f, 0xc3, 0x28, 0x01]);
-    phone.sendFrame(payload);
+    phone.sendSignal(payload);
 
-    const received = await expectMessage(daemon, "frame");
+    const received = await expectMessage(daemon, "signal");
     expect(received.connectionId).toBe(phone.connectionId);
     expect(Array.from(decodeBase64(received.data)!)).toEqual(Array.from(payload));
 
     // And in the other direction, addressed to that client.
     const reply = new Uint8Array([0x42, 0x00, 0xfe]);
-    daemon.sendFrame(reply, phone.connectionId);
-    const back = await expectMessage(phone, "frame");
+    daemon.sendSignal(reply, phone.connectionId);
+    const back = await expectMessage(phone, "signal");
     expect(back.connectionId).toBeUndefined();
     expect(Array.from(decodeBase64(back.data)!)).toEqual(Array.from(reply));
 
@@ -66,22 +66,22 @@ describe("frame routing", () => {
 
     // Each client's frames reach the device tagged with that client's id,
     // and never reach the other client.
-    phoneA.sendFrame(new Uint8Array([0xa1]));
-    const fromA = await expectMessage(daemon, "frame");
+    phoneA.sendSignal(new Uint8Array([0xa1]));
+    const fromA = await expectMessage(daemon, "signal");
     expect(fromA.connectionId).toBe(phoneA.connectionId);
-    phoneB.sendFrame(new Uint8Array([0xb1]));
-    const fromB = await expectMessage(daemon, "frame");
+    phoneB.sendSignal(new Uint8Array([0xb1]));
+    const fromB = await expectMessage(daemon, "signal");
     expect(fromB.connectionId).toBe(phoneB.connectionId);
 
     // A reply to A goes to A only.
-    daemon.sendFrame(new Uint8Array([0xa2]), phoneA.connectionId);
-    const atA = await expectMessage(phoneA, "frame");
+    daemon.sendSignal(new Uint8Array([0xa2]), phoneA.connectionId);
+    const atA = await expectMessage(phoneA, "signal");
     expect(Array.from(decodeBase64(atA.data)!)).toEqual([0xa2]);
     await phoneB.expectSilence();
 
     // And a reply to B goes to B only.
-    daemon.sendFrame(new Uint8Array([0xb2]), phoneB.connectionId);
-    const atB = await expectMessage(phoneB, "frame");
+    daemon.sendSignal(new Uint8Array([0xb2]), phoneB.connectionId);
+    const atB = await expectMessage(phoneB, "signal");
     expect(Array.from(decodeBase64(atB.data)!)).toEqual([0xb2]);
     await phoneA.expectSilence();
 
@@ -98,17 +98,17 @@ describe("frame routing", () => {
 
     // Without an addressee the relay will not guess, and certainly not
     // broadcast.
-    daemon.sendFrame(new Uint8Array([1]));
+    daemon.sendSignal(new Uint8Array([1]));
     const missing = await expectMessage(daemon, "error");
     expect(missing.code).toBe("bad_request");
 
     const unknown = "0".repeat(32);
-    daemon.sendFrame(new Uint8Array([1]), unknown);
+    daemon.sendSignal(new Uint8Array([1]), unknown);
     const absent = await expectMessage(daemon, "error");
     expect(absent.code).toBe("peer_unavailable");
     expect(absent.connectionId).toBe(unknown);
 
-    daemon.sendJson({ type: "frame", data: "AQ==", connection_id: "not-an-id" });
+    daemon.sendJson({ type: "signal", kind: "ice", data: "AQ==", connection_id: "not-an-id" });
     const malformed = await expectMessage(daemon, "error");
     expect(malformed.code).toBe("bad_request");
 
@@ -125,7 +125,7 @@ describe("frame routing", () => {
     await expectMessage(daemon, "peer_state");
     await expectMessage(daemon, "peer_state");
 
-    phoneB.sendFrame(new Uint8Array([0xee]), phoneA.connectionId);
+    phoneB.sendSignal(new Uint8Array([0xee]), phoneA.connectionId);
     const reply = await expectMessage(phoneB, "error");
     expect(reply.code).toBe("bad_request");
     await daemon.expectSilence();
@@ -141,7 +141,7 @@ describe("frame routing", () => {
 
     // The relay is not a queue: with no client attached, the frame is
     // refused rather than stored for later delivery.
-    daemon.sendFrame(new Uint8Array([1, 2, 3]), "0".repeat(32));
+    daemon.sendSignal(new Uint8Array([1, 2, 3]), "0".repeat(32));
     const reply = await expectMessage(daemon, "error");
     expect(reply.code).toBe("peer_unavailable");
 
@@ -150,7 +150,7 @@ describe("frame routing", () => {
     await expectMessage(daemon, "peer_state");
     daemon.close();
     expect((await expectMessage(phone, "peer_state")).present).toBe(false);
-    phone.sendFrame(new Uint8Array([4]));
+    phone.sendSignal(new Uint8Array([4]));
     expect((await expectMessage(phone, "error")).code).toBe("peer_unavailable");
     phone.close();
   });
@@ -215,8 +215,8 @@ describe("frame routing", () => {
     });
 
     // The other client is unaffected.
-    phoneB.sendFrame(new Uint8Array([7]));
-    expect((await expectMessage(daemon, "frame")).connectionId).toBe(phoneB.connectionId);
+    phoneB.sendSignal(new Uint8Array([7]));
+    expect((await expectMessage(daemon, "signal")).connectionId).toBe(phoneB.connectionId);
 
     daemon.close();
     phoneB.close();
@@ -227,7 +227,7 @@ describe("frame routing", () => {
     const peer = await TestPeer.connect(device.deviceIdText);
     await peer.challenge();
 
-    peer.sendFrame(new Uint8Array([1]));
+    peer.sendSignal(new Uint8Array([1]));
     const reply = await expectMessage(peer, "error");
     expect(reply.code).toBe("not_registered");
   });
@@ -256,14 +256,14 @@ describe("frame routing", () => {
     const phoneA = await connectAttachedClient(deviceA.deviceIdText, deviceA.deviceId);
     await daemonA.next(); // presence
 
-    phoneA.sendFrame(new Uint8Array([0xaa]));
+    phoneA.sendSignal(new Uint8Array([0xaa]));
 
-    const atA = await expectMessage(daemonA, "frame");
+    const atA = await expectMessage(daemonA, "signal");
     expect(Array.from(decodeBase64(atA.data)!)).toEqual([0xaa]);
 
     // Device B shares no state with A: A's client is unknown on B's route,
     // and B never sees A's frame.
-    daemonB.sendFrame(new Uint8Array([0xbb]), phoneA.connectionId);
+    daemonB.sendSignal(new Uint8Array([0xbb]), phoneA.connectionId);
     const atB = await expectMessage(daemonB, "error");
     expect(atB.code).toBe("peer_unavailable");
     await phoneA.expectSilence();
@@ -281,7 +281,7 @@ describe("limits", () => {
     const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
     await daemon.next(); // presence
 
-    phone.sendFrame(new Uint8Array(LIMITS.maxFrameBytes + 1));
+    phone.sendSignal(new Uint8Array(LIMITS.maxSignalBytes + 1));
     const reply = await phone.next();
     if (reply.type !== "error") throw new Error(`expected error, got ${reply.type}`);
     expect(reply.code).toBe("message_too_large");
@@ -294,7 +294,7 @@ describe("limits", () => {
     const device = await createDevice();
     const daemon = await connectRegisteredDevice(device);
 
-    daemon.send("x".repeat(maxMessageLength(LIMITS.maxFrameBytes) + 1));
+    daemon.send("x".repeat(maxMessageLength(LIMITS.maxSignalBytes) + 1));
     const reply = await expectMessage(daemon, "error");
     expect(reply.code).toBe("message_too_large");
     daemon.close();
@@ -306,12 +306,12 @@ describe("limits", () => {
     const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
     await daemon.next(); // presence
 
-    const payload = new Uint8Array(LIMITS.maxFrameBytes).fill(0x5a);
-    phone.sendFrame(payload);
+    const payload = new Uint8Array(LIMITS.maxSignalBytes).fill(0x5a);
+    phone.sendSignal(payload);
 
     const received = await daemon.next();
-    if (received.type !== "frame") throw new Error(`expected frame, got ${received.type}`);
-    expect(decodeBase64(received.data)!.length).toBe(LIMITS.maxFrameBytes);
+    if (received.type !== "signal") throw new Error(`expected signal, got ${received.type}`);
+    expect(decodeBase64(received.data)!.length).toBe(LIMITS.maxSignalBytes);
 
     daemon.close();
     phone.close();
@@ -323,7 +323,7 @@ describe("limits", () => {
     const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
     await daemon.next();
 
-    phone.sendJson({ type: "frame", data: "" });
+    phone.sendJson({ type: "signal", kind: "ice", data: "" });
     const reply = await phone.next();
     if (reply.type !== "error") throw new Error(`expected error, got ${reply.type}`);
     expect(reply.code).toBe("bad_request");
@@ -367,13 +367,13 @@ describe("limits", () => {
 
     // Past the window allowance the socket is closed rather than letting one
     // peer monopolise the object.
-    for (let i = 0; i < LIMITS.maxFramesPerWindow + 10; i++) {
-      phone.sendFrame(new Uint8Array([i & 0xff]));
+    for (let i = 0; i < LIMITS.maxMessagesPerWindow + 10; i++) {
+      phone.sendSignal(new Uint8Array([i & 0xff]));
     }
 
     // Drain until the relay reports the limit.
     let sawRateLimit = false;
-    for (let i = 0; i < LIMITS.maxFramesPerWindow + 20 && !sawRateLimit; i++) {
+    for (let i = 0; i < LIMITS.maxMessagesPerWindow + 20 && !sawRateLimit; i++) {
       let message;
       try {
         message = await phone.next(1_000);
@@ -398,7 +398,7 @@ describe("limits", () => {
 
     // Well past the per-window allowance: if pings reached the handler, the
     // socket would be rate-limited and closed.
-    const pings = LIMITS.maxFramesPerWindow + 30;
+    const pings = LIMITS.maxMessagesPerWindow + 30;
     for (let i = 0; i < pings; i++) phone.send(KEEPALIVE_PING);
     for (let i = 0; i < pings; i++) {
       expect(await phone.next()).toEqual({ type: "pong" });
@@ -406,8 +406,8 @@ describe("limits", () => {
     expect(phone.closed).toBeNull();
 
     // The connection still forwards frames, and the device saw none of it.
-    phone.sendFrame(new Uint8Array([5]));
-    expect((await expectMessage(daemon, "frame")).connectionId).toBe(phone.connectionId);
+    phone.sendSignal(new Uint8Array([5]));
+    expect((await expectMessage(daemon, "signal")).connectionId).toBe(phone.connectionId);
 
     daemon.close();
     phone.close();

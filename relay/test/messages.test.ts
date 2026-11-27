@@ -20,9 +20,10 @@ describe("envelope parser", () => {
     expect(result).toMatchObject({ ok: false, code: "message_too_large" });
   });
 
-  it("accepts the largest legitimate frame", () => {
+  it("accepts the largest legitimate signal", () => {
     const raw = JSON.stringify({
-      type: "frame",
+      type: "signal",
+      kind: "offer",
       data: encodeBase64(new Uint8Array(MAX_FRAME)),
       connection_id: "f".repeat(32),
     });
@@ -31,9 +32,10 @@ describe("envelope parser", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("rejects frame data that encodes more than the payload limit", () => {
+  it("rejects signal data that encodes more than the payload limit", () => {
     const raw = JSON.stringify({
-      type: "frame",
+      type: "signal",
+      kind: "ice",
       data: encodeBase64(new Uint8Array(MAX_FRAME + 1)),
     });
     const result = parseClientMessage(raw, MAX_FRAME);
@@ -53,7 +55,21 @@ describe("envelope parser", () => {
 
   it("validates the connection id format", () => {
     for (const connectionId of ["", "F".repeat(32), "f".repeat(31), "f".repeat(33), 7]) {
-      const raw = JSON.stringify({ type: "frame", data: "AQ==", connection_id: connectionId });
+      const raw = JSON.stringify({ type: "signal", kind: "ice", data: "AQ==", connection_id: connectionId });
+      expect(parseClientMessage(raw, MAX_FRAME)).toMatchObject({ ok: false, code: "bad_request" });
+    }
+  });
+
+  it("accepts each signal kind and rejects others", () => {
+    for (const kind of ["offer", "answer", "ice", "ice_servers"]) {
+      const raw = JSON.stringify({ type: "signal", kind, data: "AQ==" });
+      expect(parseClientMessage(raw, MAX_FRAME)).toMatchObject({
+        ok: true,
+        value: { type: "signal", payload: { kind } },
+      });
+    }
+    for (const kind of ["", "OFFER", "candidate", "frame", null, 1]) {
+      const raw = JSON.stringify({ type: "signal", kind, data: "AQ==" });
       expect(parseClientMessage(raw, MAX_FRAME)).toMatchObject({ ok: false, code: "bad_request" });
     }
   });
