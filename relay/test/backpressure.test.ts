@@ -7,15 +7,40 @@ import { describe, expect, it } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import {
   type TestDevice,
+  TestPeer,
   connectAttachedClient,
   connectRegisteredDevice,
   createDevice,
   expectMessage,
 } from "./helpers";
-import { type Receiver, sendWithinBudget } from "../src/backpressure";
+import { QueueLedger, type Receiver, sendWithinBudget } from "../src/backpressure";
 import type { DeviceRoom } from "../src/device-room";
 import { LIMITS } from "../src/limits";
+import { frameMessage, serializeServerMessage } from "../src/messages";
 import { encodeBase64 } from "../src/protocol";
+
+type Attachment = Record<string, unknown>;
+
+/** Finds the relay-side socket whose attachment matches. */
+function socketWhere(state: DurableObjectState, pred: (a: Attachment) => boolean): WebSocket {
+  const ws = state.getWebSockets().find((s) => pred(s.deserializeAttachment() as Attachment));
+  if (ws === undefined) throw new Error("socket not found");
+  return ws;
+}
+
+/**
+ * Queues exactly `size` bytes toward a socket. Inside one handler run
+ * nothing drains, so this stands in for a peer that stopped reading.
+ */
+function fill(ws: WebSocket, size: number): void {
+  const empty = JSON.stringify({ type: "filler", pad: "" }).length;
+  ws.send(JSON.stringify({ type: "filler", pad: "p".repeat(size - empty) }));
+}
+
+/** A client frame message carrying `size` payload bytes. */
+function clientFrame(size: number): string {
+  return JSON.stringify({ type: "frame", data: encodeBase64(new Uint8Array(size)) });
+}
 
 /** A receiver that never drains, counting what was queued. */
 class StalledReceiver implements Receiver {
@@ -57,6 +82,54 @@ describe("send budget", () => {
     receiver.bufferedAmount = LIMITS.maxBufferedBytes - 10;
     expect(sendWithinBudget(receiver, "x".repeat(10), LIMITS.maxBufferedBytes)).toBe(true);
     expect(sendWithinBudget(receiver, "x", LIMITS.maxBufferedBytes)).toBe(false);
+  });
+});
+
+describe("queue ledger", () => {
+  it("charges queued bytes to their owner until they drain, in order", () => {
+    const ledger = new QueueLedger(0);
+    ledger.record(100, "a");
+    ledger.record(50);
+    ledger.record(30, "b");
+    ledger.record(20, "a");
+    expect(ledger.inFlight("a")).toBe(120);
+    expect(ledger.inFlight("b")).toBe(30);
+
+    // 120 of the 200 bytes have left: a's first message and the relay's.
+    ledger.settle(80);
+    expect(ledger.inFlight("a")).toBe(20);
+    expect(ledger.inFlight("b")).toBe(30);
+
+    // A partly written message is still charged in full.
+    ledger.settle(40);
+    expect(ledger.inFlight("b")).toBe(30);
+
+    ledger.settle(0);
+    expect(ledger.inFlight("a")).toBe(0);
+    expect(ledger.inFlight("b")).toBe(0);
+  });
+
+  it("charges what was queued before tracking began to no one", () => {
+    const ledger = new QueueLedger(500);
+    ledger.record(100, "a");
+    ledger.settle(150);
+    expect(ledger.inFlight("a")).toBe(100);
+    ledger.settle(100);
+    expect(ledger.inFlight("a")).toBe(100);
+    ledger.settle(0);
+    expect(ledger.inFlight("a")).toBe(0);
+  });
+});
+
+describe("device queue limits", () => {
+  it("fits a full-size frame in one client's share and every share in the device queue", () => {
+    const largest = serializeServerMessage(
+      frameMessage(new Uint8Array(LIMITS.maxFrameBytes), "0".repeat(32)),
+    );
+    expect(largest.length).toBeLessThanOrEqual(LIMITS.maxClientShareBytes);
+    expect(LIMITS.maxDeviceBufferedBytes).toBe(
+      LIMITS.maxClients * LIMITS.maxClientShareBytes + LIMITS.deviceReserveBytes,
+    );
   });
 });
 
@@ -107,5 +180,110 @@ describe("slow receiver", () => {
 
     daemon.close();
     other.close();
+  });
+});
+
+describe("slow device", () => {
+  it("closes a client that floods the device, not the device", async () => {
+    const device = await createDevice();
+    const daemon = await connectRegisteredDevice(device);
+    const flooder = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    const other = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    await expectMessage(daemon, "peer_state");
+    await expectMessage(daemon, "peer_state");
+
+    // Every frame arrives within one run of the object, so the device reads
+    // none of them in between: it is slower than the flood.
+    const frame = clientFrame(LIMITS.maxFrameBytes);
+    await runInDurableObject(roomFor(device), async (instance: DeviceRoom, state) => {
+      const flooderSide = socketWhere(state, (a) => a["connectionId"] === flooder.connectionId);
+      const otherSide = socketWhere(state, (a) => a["connectionId"] === other.connectionId);
+      for (let i = 0; i < 10; i++) await instance.webSocketMessage(flooderSide, frame);
+
+      // The flooder's frames are still queued toward the device, yet the
+      // other client's share is untouched.
+      await instance.webSocketMessage(otherSide, frame);
+    });
+
+    expect((await expectMessage(flooder, "error")).code).toBe("rate_limited");
+    expect((await flooder.waitClosed()).code).toBe(4001);
+
+    // The device got the frame that fit, learned the flooder left, and got
+    // the other client's frame.
+    expect((await expectMessage(daemon, "frame")).connectionId).toBe(flooder.connectionId);
+    expect(await expectMessage(daemon, "peer_state")).toEqual({
+      type: "peer_state",
+      connectionId: flooder.connectionId,
+      present: false,
+    });
+    expect((await expectMessage(daemon, "frame")).connectionId).toBe(other.connectionId);
+    expect(daemon.closed).toBeNull();
+
+    // The device stays registered and the other client keeps working.
+    other.sendFrame(new Uint8Array([1]));
+    expect((await expectMessage(daemon, "frame")).connectionId).toBe(other.connectionId);
+    daemon.sendFrame(new Uint8Array([2]), other.connectionId);
+    expect((await expectMessage(other, "frame")).data).toBe(encodeBase64(new Uint8Array([2])));
+    expect(other.closed).toBeNull();
+
+    daemon.close();
+    other.close();
+  });
+
+  it("closes the sending client when the part of the device queue clients may use is full", async () => {
+    const device = await createDevice();
+    const daemon = await connectRegisteredDevice(device);
+    const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    await expectMessage(daemon, "peer_state");
+
+    const clientLimit = LIMITS.maxDeviceBufferedBytes - LIMITS.deviceReserveBytes;
+    await runInDurableObject(roomFor(device), async (instance: DeviceRoom, state) => {
+      const daemonSide = socketWhere(state, (a) => a["role"] === "device");
+      const phoneSide = socketWhere(state, (a) => a["connectionId"] === phone.connectionId);
+      // Bytes no live client owns, such as frames from clients already gone.
+      fill(daemonSide, clientLimit - 100);
+      await instance.webSocketMessage(phoneSide, clientFrame(200));
+    });
+
+    expect((await expectMessage(phone, "error")).code).toBe("rate_limited");
+    expect((await phone.waitClosed()).code).toBe(4001);
+
+    expect((await daemon.next()).type).toBe("filler");
+    expect(await expectMessage(daemon, "peer_state")).toEqual({
+      type: "peer_state",
+      connectionId: phone.connectionId,
+      present: false,
+    });
+    expect(daemon.closed).toBeNull();
+    daemon.close();
+  });
+
+  it("refuses an attach while the device is far behind, without closing the device", async () => {
+    const device = await createDevice();
+    const daemon = await connectRegisteredDevice(device);
+    const newcomer = await TestPeer.connect(device.deviceIdText);
+    const challenge = encodeBase64(await newcomer.challenge());
+    const attach = JSON.stringify({ type: "attach", version: 1, device_id: encodeBase64(device.deviceId) });
+
+    const arrivalLimit = LIMITS.maxDeviceBufferedBytes - LIMITS.deviceReserveBytes / 2;
+    await runInDurableObject(roomFor(device), async (instance: DeviceRoom, state) => {
+      const daemonSide = socketWhere(state, (a) => a["role"] === "device");
+      const newcomerSide = socketWhere(state, (a) => a["challenge"] === challenge);
+      fill(daemonSide, arrivalLimit - 10);
+      await instance.webSocketMessage(newcomerSide, attach);
+    });
+
+    expect((await expectMessage(newcomer, "error")).code).toBe("peer_unavailable");
+    expect((await newcomer.waitClosed()).code).toBe(4001);
+
+    expect((await daemon.next()).type).toBe("filler");
+    await daemon.expectSilence();
+    expect(daemon.closed).toBeNull();
+
+    // Once the device has caught up, attaching works again.
+    const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    expect((await expectMessage(daemon, "peer_state")).connectionId).toBe(phone.connectionId);
+    daemon.close();
+    phone.close();
   });
 });

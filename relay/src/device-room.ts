@@ -46,7 +46,7 @@ import {
   verifyEd25519,
 } from "./protocol";
 import { LIMITS, sourceKey } from "./limits";
-import { sendWithinBudget } from "./backpressure";
+import { QueueLedger, sendWithinBudget } from "./backpressure";
 
 /** Bindings available to the Worker and the object. */
 export interface Env {
@@ -110,6 +110,12 @@ function writeState(ws: WebSocket, state: SocketState): void {
 export class DeviceRoom implements DurableObject {
   readonly #state: DurableObjectState;
   readonly #env: Env;
+  /**
+   * Who the bytes queued toward each device socket belong to. Kept in
+   * memory only: after the object is evicted, whatever is still queued is
+   * charged to no client, which only makes the shared limit stricter.
+   */
+  readonly #ledgers = new WeakMap<WebSocket, QueueLedger>();
 
   constructor(state: DurableObjectState, env: Env) {
     this.#state = state;
@@ -482,6 +488,19 @@ export class DeviceRoom implements DurableObject {
       return;
     }
 
+    // Arrivals are the one notice to the device a client can cause at
+    // will, so they may use only half of the device's reserve. The other
+    // half is left for departure notices, which cannot be refused, so a
+    // stream of attaches cannot push a slow device past its limit.
+    const connectionId = newConnectionId();
+    const arrival = serializeServerMessage({ type: "peer_state", connectionId, present: true });
+    const devices = this.#sockets("device");
+    const arrivalLimit = LIMITS.maxDeviceBufferedBytes - LIMITS.deviceReserveBytes / 2;
+    if (devices.some((daemon) => daemon.bufferedAmount + arrival.length > arrivalLimit)) {
+      this.#closeWith(ws, "peer_unavailable", "the device is not keeping up; try again later");
+      return;
+    }
+
     // Bounding attached clients keeps one device's route from being used to
     // hold open an unbounded number of sockets. When the slots are full, an
     // idle client gives way to the newcomer, so sockets that attach and then
@@ -502,7 +521,6 @@ export class DeviceRoom implements DurableObject {
       this.#drop(victim, CLOSE_CODES.evicted, "evicted while idle");
     }
 
-    const connectionId = newConnectionId();
     writeState(ws, {
       role: "client",
       connectionId,
@@ -511,7 +529,6 @@ export class DeviceRoom implements DurableObject {
       windowCount: state.windowCount,
     });
 
-    const devices = this.#sockets("device");
     this.#send(ws, {
       type: "attached",
       deviceId: formatDeviceId(payload.deviceId),
@@ -586,24 +603,60 @@ export class DeviceRoom implements DurableObject {
       return;
     }
     const message = serializeServerMessage(frameMessage(payload.data, state.connectionId));
-    let delivered = false;
     for (const daemon of devices) {
-      if (this.#forward(daemon, message)) delivered = true;
-    }
-    if (!delivered) {
-      this.#send(ws, errorMessage("peer_unavailable", "the device was too slow and was disconnected"));
+      if (!this.#forwardToDevice(daemon, message, state.connectionId)) {
+        // The sender is closed, not the device: otherwise any peer that
+        // knows the device id could disconnect it by flooding frames.
+        this.#closeWith(ws, "rate_limited", "frames are arriving faster than the device reads them");
+        return;
+      }
     }
   }
 
   /**
-   * Sends a frame within the receiver's queue budget. A receiver that would
-   * exceed it is closed and its peers are told it left; the frame is dropped
-   * rather than buffered.
+   * Sends a frame to a client within its queue budget. A client that would
+   * exceed it is closed and the device is told it left; the frame is
+   * dropped rather than buffered.
    */
   #forward(target: WebSocket, message: string): boolean {
-    if (sendWithinBudget(target, message, LIMITS.maxBufferedBytes)) return true;
+    if (this.#deliver(target, message, LIMITS.maxBufferedBytes)) return true;
     this.#drop(target, CLOSE_CODES.slowReceiver, "receive queue limit exceeded");
     return false;
+  }
+
+  /**
+   * Sends a client's frame to the device within that client's share of the
+   * device's queue, and within the part of the queue clients may use at
+   * all. Returns false, without sending, when the frame does not fit.
+   */
+  #forwardToDevice(device: WebSocket, message: string, connectionId: string): boolean {
+    const charged = this.#ledger(device).inFlight(connectionId);
+    if (charged + message.length > LIMITS.maxClientShareBytes) return false;
+    const clientLimit = LIMITS.maxDeviceBufferedBytes - LIMITS.deviceReserveBytes;
+    return this.#deliver(device, message, clientLimit, connectionId);
+  }
+
+  /** Returns a device socket's ledger, brought up to date with what has drained. */
+  #ledger(device: WebSocket): QueueLedger {
+    let ledger = this.#ledgers.get(device);
+    if (ledger === undefined) {
+      ledger = new QueueLedger(device.bufferedAmount);
+      this.#ledgers.set(device, ledger);
+    }
+    ledger.settle(device.bufferedAmount);
+    return ledger;
+  }
+
+  /**
+   * Sends unless the receiver's queue would go past `limit` bytes, and
+   * records a message to the device on its ledger, charged to `owner`.
+   * Returns false, without sending, when it would not fit.
+   */
+  #deliver(target: WebSocket, message: string, limit: number, owner?: string): boolean {
+    const ledger = readState(target)?.role === "device" ? this.#ledger(target) : null;
+    if (!sendWithinBudget(target, message, limit)) return false;
+    ledger?.record(message.length, owner);
+    return true;
   }
 
   /** Records traffic to a client, so it does not count as idle. */
@@ -691,11 +744,7 @@ export class DeviceRoom implements DurableObject {
   }
 
   #send(ws: WebSocket, message: ServerMessage): void {
-    try {
-      ws.send(serializeServerMessage(message));
-    } catch {
-      // The socket is already gone; the close handler does the cleanup.
-    }
+    this.#deliver(ws, serializeServerMessage(message), Number.POSITIVE_INFINITY);
   }
 
   /** Reports an error and closes the socket. */

@@ -10,8 +10,22 @@
  * - at most `maxFramesPerWindow` messages per `rateWindowMs` from a client,
  *   `maxDeviceFramesPerWindow` from the device (it serves every client);
  *   keepalive pings are answered by the platform and do not count;
- * - at most `maxBufferedBytes` queued toward a receiver; a slower receiver
- *   is closed instead of letting the queue grow.
+ * - at most `maxBufferedBytes` queued toward a client; a slower client is
+ *   closed instead of letting the queue grow.
+ *
+ * Enforced on the device's queue (in the Durable Object), which every client
+ * of the device writes into:
+ * - at most `maxClientShareBytes` of one client's frames in flight, and at
+ *   most `maxDeviceBufferedBytes - deviceReserveBytes` of client frames in
+ *   all. A client whose frame does not fit is closed, never the device, so
+ *   a peer that knows a device id cannot disconnect the device by flooding
+ *   it, and one client cannot take the others' share;
+ * - a client may attach only while the device's queue has room for its
+ *   arrival notice below `maxDeviceBufferedBytes - deviceReserveBytes / 2`,
+ *   which keeps the rest of the reserve for departure notices;
+ * - at most `maxDeviceBufferedBytes` queued in all; only the relay's own
+ *   messages can reach it, and a device that falls that far behind is
+ *   reading too slowly and is closed.
  *
  * Enforced per device (in the Durable Object):
  * - an unauthenticated socket is closed `challengeTtlMs` after connecting;
@@ -75,8 +89,24 @@ export const LIMITS = {
   maxDeviceFramesPerWindow: 120 * 4,
   /** Length of the rate-limiting window. */
   rateWindowMs: 1_000,
-  /** Bytes allowed to queue toward one receiver before it is closed. */
+  /** Bytes allowed to queue toward one client before it is closed. */
   maxBufferedBytes: 256 * 1024,
+  /**
+   * Bytes of one client's frames allowed in flight toward the device. It
+   * holds one frame at the payload limit; a client that would go past it is
+   * closed.
+   */
+  maxClientShareBytes: 64 * 1024,
+  /**
+   * Part of the device's queue that client frames may not use, kept for the
+   * relay's own messages to the device: presence notices and error replies.
+   */
+  deviceReserveBytes: 64 * 1024,
+  /**
+   * Bytes allowed to queue toward the device before it is closed: a full
+   * share for every client slot plus the reserve.
+   */
+  maxDeviceBufferedBytes: 4 * 64 * 1024 + 64 * 1024,
 } as const;
 
 /** Mirror of the rate-limit bindings in wrangler.jsonc. */
