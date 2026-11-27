@@ -16,6 +16,7 @@ import {
   expectMessage,
 } from "./helpers";
 import { LIMITS } from "../src/device-room";
+import { maxMessageLength } from "../src/messages";
 import { decodeBase64, encodeBase64 } from "../src/protocol";
 
 describe("frame routing", () => {
@@ -287,6 +288,16 @@ describe("limits", () => {
 
     daemon.close();
     phone.close();
+  });
+
+  it("rejects an oversized raw message before parsing it", async () => {
+    const device = await createDevice();
+    const daemon = await connectRegisteredDevice(device);
+
+    daemon.send("x".repeat(maxMessageLength(LIMITS.maxFrameBytes) + 1));
+    const reply = await expectMessage(daemon, "error");
+    expect(reply.code).toBe("message_too_large");
+    daemon.close();
   });
 
   it("accepts a frame at exactly the limit", async () => {

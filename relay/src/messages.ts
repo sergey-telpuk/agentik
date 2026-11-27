@@ -154,16 +154,41 @@ function readBytes(
   return bytes;
 }
 
+/** Longest relay identifier accepted in a registration. */
+export const MAX_RELAY_ID_LENGTH = 128;
+
+/** Length of the base64 text that encodes `byteLength` bytes. */
+function base64Length(byteLength: number): number {
+  return 4 * Math.ceil(byteLength / 3);
+}
+
+/**
+ * Longest raw message accepted, in UTF-16 code units.
+ *
+ * The largest legitimate message is a frame at the payload limit: its base64
+ * data plus a connection id and the JSON keys. 512 units of headroom covers
+ * that envelope and is far below what would make parsing expensive. Every
+ * valid message is ASCII, so this also bounds its UTF-8 byte length.
+ */
+export function maxMessageLength(maxFrameBytes: number): number {
+  return base64Length(maxFrameBytes) + 512;
+}
+
 /**
  * Parses a message from a peer.
  *
  * `raw` is untrusted input from the network, so this function assumes
- * nothing about its shape.
+ * nothing about its shape. Its length is bounded before JSON.parse, so an
+ * oversized message is rejected without building an object tree for it.
  */
 export function parseClientMessage(
   raw: string,
   maxFrameBytes: number,
 ): ParseResult<ClientMessage> {
+  if (raw.length > maxMessageLength(maxFrameBytes)) {
+    return fail("message_too_large", "message exceeds the size limit");
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -202,6 +227,9 @@ function parseRegister(message: Record<string, unknown>): ParseResult<ClientMess
   const relayId = readString(message, "relay_id");
   if (relayId === null || relayId.length === 0) {
     return fail("bad_request", "relay_id is required");
+  }
+  if (relayId.length > MAX_RELAY_ID_LENGTH) {
+    return fail("bad_request", "relay_id is too long");
   }
 
   const deviceId = readBytes(message, "device_id", DEVICE_ID_SIZE);
@@ -271,10 +299,11 @@ function parseFrame(
   if (dataText === null) {
     return fail("bad_request", "data is required");
   }
-  // Check the encoded length first: decoding is what would allocate, so the
-  // bound is applied before that work happens. Base64 expands by 4/3, so an
-  // encoded string over that ratio cannot decode within the limit.
-  if (dataText.length > Math.ceil((maxFrameBytes * 4) / 3) + 4) {
+  // The raw message was already bounded before parsing. This tighter check
+  // on the encoded field rejects an oversized frame without decoding it:
+  // base64 text longer than the encoding of maxFrameBytes cannot decode to
+  // a payload within the limit.
+  if (dataText.length > base64Length(maxFrameBytes)) {
     return fail("message_too_large", "frame exceeds the size limit");
   }
   const data = decodeBase64(dataText);
