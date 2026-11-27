@@ -12,8 +12,10 @@ import {
   RELAY_ID,
   TestPeer,
   buildRegister,
+  connectAttachedClient,
   connectRegisteredDevice,
   createDevice,
+  expectMessage,
 } from "./helpers";
 import { encodeBase64 } from "../src/protocol";
 
@@ -259,6 +261,33 @@ describe("device registration", () => {
 
     incumbent.close();
     client.close();
+  });
+
+  it("rejects a validly signed registration for another device's route", async () => {
+    const device = await createDevice();
+    const squatter = await createDevice();
+    const incumbent = await connectRegisteredDevice(device);
+    const phone = await connectAttachedClient(device.deviceIdText, device.deviceId);
+    await expectMessage(incumbent, "peer_state");
+
+    // The squatter's registration is entirely valid for its own key; only
+    // the address it was presented on belongs to someone else.
+    const intruder = await TestPeer.connect(device.deviceIdText);
+    const challenge = await intruder.challenge();
+    intruder.send(await buildRegister(squatter, { challenge }));
+    const rejection = await expectMessage(intruder, "error");
+    expect(rejection.code).toBe("unauthorized");
+    expect(rejection.message).toContain("route");
+    expect((await intruder.waitClosed()).code).toBe(4001);
+
+    // The real daemon still owns the route and still carries traffic.
+    phone.sendFrame(new Uint8Array([9]));
+    const frame = await expectMessage(incumbent, "frame");
+    expect(frame.connectionId).toBe(phone.connectionId);
+    expect(incumbent.closed).toBeNull();
+
+    incumbent.close();
+    phone.close();
   });
 
   it("replaces an older connection when the same key re-registers", async () => {

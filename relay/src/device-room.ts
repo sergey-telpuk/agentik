@@ -6,9 +6,10 @@
  * time.
  *
  * What this object holds is deliberately small: the live sockets, the
- * challenge issued to each unauthenticated socket, and counters for the
- * limits. No frame contents, no Noise keys, and no task history. Frames pass
- * through as opaque bytes and are never written to storage or to logs.
+ * challenge issued to each unauthenticated socket, the connection identifier
+ * of each attached client, and counters for the limits. No frame contents,
+ * no Noise keys, and no task history. Frames pass through as opaque bytes and
+ * are never written to storage or to logs.
  *
  * The WebSocket Hibernation API is used: the handler may be evicted while
  * sockets stay open, and an inbound message revives it. Per-socket state
@@ -17,10 +18,15 @@
  */
 
 import {
+  CLOSE_CODES,
+  type AttachPayload,
   type ErrorCode,
+  type FramePayload,
+  type RegisterPayload,
   type ServerMessage,
   errorMessage,
   frameMessage,
+  newConnectionId,
   parseClientMessage,
   serializeServerMessage,
   toRegisterRequest,
@@ -72,6 +78,8 @@ interface SocketState {
   challenge?: string;
   /** When the challenge stops being acceptable (epoch ms). */
   challengeExpiresAt?: number;
+  /** Relay-assigned identifier of an attached client. */
+  connectionId?: string;
   /** Start of the current rate-limit window (epoch ms). */
   windowStart: number;
   /** Frames seen in the current window. */
@@ -184,18 +192,30 @@ export class DeviceRoom implements DurableObject {
         this.#handleAttach(ws, state, parsed.value.payload);
         return;
       case "frame":
-        this.#handleFrame(ws, state, parsed.value.payload.data);
+        this.#handleFrame(ws, state, parsed.value.payload);
         return;
     }
   }
 
   /** Notifies the peer when a socket goes away. */
   async webSocketClose(ws: WebSocket): Promise<void> {
-    this.#announcePresence(ws);
+    this.#announceDeparture(ws);
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
-    this.#announcePresence(ws);
+    this.#announceDeparture(ws);
+  }
+
+  /**
+   * Reports whether a device id names this object.
+   *
+   * The object's own id is compared with the id derived from the claimed
+   * device, so the check does not depend on `id.name` being populated: an
+   * object reached any other way fails closed.
+   */
+  #isThisRoute(deviceId: Uint8Array): boolean {
+    const expected = this.#env.DEVICE.idFromName(formatDeviceId(deviceId));
+    return expected.equals(this.#state.id);
   }
 
   /**
@@ -208,7 +228,7 @@ export class DeviceRoom implements DurableObject {
   async #handleRegister(
     ws: WebSocket,
     state: SocketState,
-    payload: import("./messages").RegisterPayload,
+    payload: RegisterPayload,
   ): Promise<void> {
     if (state.role !== "pending") {
       this.#send(ws, errorMessage("bad_request", "this connection is already registered"));
@@ -263,8 +283,7 @@ export class DeviceRoom implements DurableObject {
     // The object is addressed by device id, so a registration for a
     // different device reaching this object would mean the route and the
     // claim disagree.
-    const expectedName = formatDeviceId(derivedId);
-    if (this.#state.id.name !== undefined && this.#state.id.name !== expectedName) {
+    if (!this.#isThisRoute(derivedId)) {
       this.#closeWith(ws, "unauthorized", "registration does not match this route");
       return;
     }
@@ -281,7 +300,7 @@ export class DeviceRoom implements DurableObject {
     // running daemon.
     for (const other of this.#sockets("device")) {
       if (other !== ws) {
-        this.#closeSocket(other, 4000, "replaced by a newer registration");
+        this.#closeSocket(other, CLOSE_CODES.replaced, "replaced by a newer registration");
       }
     }
 
@@ -290,10 +309,17 @@ export class DeviceRoom implements DurableObject {
       windowStart: Date.now(),
       windowCount: 0,
     });
-    this.#send(ws, { type: "registered", deviceId: expectedName });
+
+    // The device learns which clients are already waiting, so it can expect
+    // their handshakes.
+    const clients = this.#sockets("client");
+    const connections = clients
+      .map((client) => readState(client)?.connectionId)
+      .filter((id): id is string => id !== undefined);
+    this.#send(ws, { type: "registered", deviceId: formatDeviceId(derivedId), connections });
 
     // Clients waiting on this device learn it is reachable.
-    for (const client of this.#sockets("client")) {
+    for (const client of clients) {
       this.#send(client, { type: "peer_state", present: true });
     }
   }
@@ -304,11 +330,7 @@ export class DeviceRoom implements DurableObject {
    * No authority is granted here. The client can exchange frames; the device
    * decides during the Noise handshake whether it is a paired peer.
    */
-  #handleAttach(
-    ws: WebSocket,
-    state: SocketState,
-    payload: import("./messages").AttachPayload,
-  ): void {
+  #handleAttach(ws: WebSocket, state: SocketState, payload: AttachPayload): void {
     if (state.role !== "pending") {
       this.#send(ws, errorMessage("bad_request", "this connection is already attached"));
       return;
@@ -318,8 +340,7 @@ export class DeviceRoom implements DurableObject {
       return;
     }
 
-    const requested = formatDeviceId(payload.deviceId);
-    if (this.#state.id.name !== undefined && this.#state.id.name !== requested) {
+    if (!this.#isThisRoute(payload.deviceId)) {
       this.#closeWith(ws, "bad_request", "device id does not match this route");
       return;
     }
@@ -331,8 +352,10 @@ export class DeviceRoom implements DurableObject {
       return;
     }
 
+    const connectionId = newConnectionId();
     writeState(ws, {
       role: "client",
+      connectionId,
       windowStart: Date.now(),
       windowCount: 0,
     });
@@ -340,64 +363,117 @@ export class DeviceRoom implements DurableObject {
     const devices = this.#sockets("device");
     this.#send(ws, {
       type: "attached",
-      deviceId: requested,
+      deviceId: formatDeviceId(payload.deviceId),
+      connectionId,
       devicePresent: devices.length > 0,
     });
 
-    // The device is told a client arrived, so it can expect a handshake
-    // rather than discovering the peer only when a frame appears.
+    // The device is told which client arrived, so it can expect a handshake
+    // on that connection rather than discovering it only when a frame appears.
     for (const daemon of devices) {
-      this.#send(daemon, { type: "peer_state", present: true });
+      this.#send(daemon, { type: "peer_state", connectionId, present: true });
     }
   }
 
   /**
-   * Forwards one opaque frame to the peer.
+   * Forwards one opaque frame to its addressee.
+   *
+   * A device frame goes to exactly the client it names. A client frame goes
+   * to the device, tagged with the connection id the relay assigned, so the
+   * device can keep a separate Noise session per client.
    *
    * The relay is not a queue: with no peer connected, the sender is told so
    * rather than the frame being held for later delivery. A task is not
    * accepted because the cloud took the bytes.
    */
-  #handleFrame(ws: WebSocket, state: SocketState, data: Uint8Array): void {
+  #handleFrame(ws: WebSocket, state: SocketState, payload: FramePayload): void {
     if (state.role === "pending") {
       this.#closeWith(ws, "not_registered", "register or attach before sending frames");
       return;
     }
 
-    const targets =
-      state.role === "device" ? this.#sockets("client") : this.#sockets("device");
-    if (targets.length === 0) {
-      this.#send(ws, errorMessage("peer_unavailable", "the peer is not connected"));
+    if (state.role === "device") {
+      if (payload.connectionId === undefined) {
+        this.#send(ws, errorMessage("bad_request", "connection_id is required on device frames"));
+        return;
+      }
+      const target = this.#client(payload.connectionId);
+      if (target === null) {
+        this.#send(
+          ws,
+          errorMessage("peer_unavailable", "the client is not connected", payload.connectionId),
+        );
+        return;
+      }
+      this.#forward(target, serializeServerMessage(frameMessage(payload.data)));
       return;
     }
 
-    const message = serializeServerMessage(frameMessage(data));
-    for (const target of targets) {
-      // A send that fails means the peer is gone; the close handler will
-      // clean it up, and one dead socket must not stop the others.
-      try {
-        target.send(message);
-      } catch {
-        // Intentionally ignored: handled by webSocketClose.
-      }
+    // A client's identity comes from the relay, never from the client.
+    if (payload.connectionId !== undefined) {
+      this.#send(ws, errorMessage("bad_request", "clients must not set connection_id"));
+      return;
+    }
+    if (state.connectionId === undefined) {
+      this.#closeWith(ws, "internal", "connection state is unavailable");
+      return;
+    }
+    const devices = this.#sockets("device");
+    if (devices.length === 0) {
+      this.#send(ws, errorMessage("peer_unavailable", "the peer is not connected"));
+      return;
+    }
+    const message = serializeServerMessage(frameMessage(payload.data, state.connectionId));
+    for (const daemon of devices) {
+      this.#forward(daemon, message);
+    }
+  }
+
+  #forward(target: WebSocket, message: string): void {
+    // A send that fails means the peer is gone; the close handler will clean
+    // it up.
+    try {
+      target.send(message);
+    } catch {
+      // Intentionally ignored: handled by webSocketClose.
     }
   }
 
   /** Tells the remaining peers that one side disconnected. */
-  #announcePresence(closing: WebSocket): void {
+  #announceDeparture(closing: WebSocket): void {
     const state = readState(closing);
     if (state === null || state.role === "pending") return;
 
-    const audience = state.role === "device" ? "client" : "device";
-    const present = this.#sockets(state.role).filter((s) => s !== closing).length > 0;
-    for (const peer of this.#sockets(audience)) {
-      this.#send(peer, { type: "peer_state", present });
+    if (state.role === "client") {
+      if (state.connectionId === undefined) return;
+      for (const daemon of this.#sockets("device")) {
+        this.#send(daemon, {
+          type: "peer_state",
+          connectionId: state.connectionId,
+          present: false,
+        });
+      }
+      return;
+    }
+
+    const present = this.#sockets("device").some((s) => s !== closing);
+    for (const client of this.#sockets("client")) {
+      this.#send(client, { type: "peer_state", present });
     }
   }
 
   /** Returns the live sockets holding a given role. */
-  #sockets(role: "device" | "client" | "pending"): WebSocket[] {
+  #sockets(role: SocketState["role"]): WebSocket[] {
     return this.#state.getWebSockets().filter((ws) => readState(ws)?.role === role);
+  }
+
+  /** Returns the attached client with a given connection id. */
+  #client(connectionId: string): WebSocket | null {
+    for (const ws of this.#state.getWebSockets()) {
+      const state = readState(ws);
+      if (state?.role === "client" && state.connectionId === connectionId) return ws;
+    }
+    return null;
   }
 
   /**
@@ -429,7 +505,7 @@ export class DeviceRoom implements DurableObject {
   /** Reports an error and closes the socket. */
   #closeWith(ws: WebSocket, code: ErrorCode, message: string): void {
     this.#send(ws, errorMessage(code, message));
-    this.#closeSocket(ws, 4001, code);
+    this.#closeSocket(ws, CLOSE_CODES.protocolError, code);
   }
 
   #closeSocket(ws: WebSocket, code: number, reason: string): void {

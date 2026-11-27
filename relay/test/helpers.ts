@@ -120,6 +120,10 @@ export class TestPeer {
   readonly #queue: ServerMessage[] = [];
   #waiters: ((message: ServerMessage) => void)[] = [];
   #closed: { code: number; reason: string } | null = null;
+  #closeWaiters: ((closed: { code: number; reason: string }) => void)[] = [];
+
+  /** The connection id the relay assigned on attach, for client peers. */
+  connectionId: string | undefined;
 
   private constructor(socket: WebSocket) {
     this.#socket = socket;
@@ -134,6 +138,7 @@ export class TestPeer {
     });
     socket.addEventListener("close", (event: CloseEvent) => {
       this.#closed = { code: event.code, reason: event.reason };
+      for (const waiter of this.#closeWaiters.splice(0)) waiter(this.#closed);
     });
   }
 
@@ -195,13 +200,43 @@ export class TestPeer {
     this.#socket.send(data as unknown as ArrayBufferView);
   }
 
-  /** Sends an opaque frame. */
-  sendFrame(data: Uint8Array): void {
-    this.sendJson({ type: "frame", data: encodeBase64(data) });
+  /** Sends an opaque frame, addressed to a client connection when given. */
+  sendFrame(data: Uint8Array, connectionId?: string): void {
+    const message: Record<string, unknown> = { type: "frame", data: encodeBase64(data) };
+    if (connectionId !== undefined) message["connection_id"] = connectionId;
+    this.sendJson(message);
   }
 
   get closed(): { code: number; reason: string } | null {
     return this.#closed;
+  }
+
+  /** Waits until the relay closes this connection. */
+  waitClosed(timeoutMs = 2_000): Promise<{ code: number; reason: string }> {
+    if (this.#closed) return Promise.resolve(this.#closed);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out waiting for close")), timeoutMs);
+      this.#closeWaiters.push((closed) => {
+        clearTimeout(timer);
+        resolve(closed);
+      });
+    });
+  }
+
+  /**
+   * Asserts that nothing arrives within a short window. Used to prove a
+   * frame was not delivered to the wrong peer.
+   */
+  async expectSilence(windowMs = 150): Promise<void> {
+    try {
+      const message = await this.next(windowMs);
+      throw new Error(`expected no message, got ${JSON.stringify(message)}`);
+    } catch (error) {
+      if (error instanceof Error && error.message === "timed out waiting for a relay message") {
+        return;
+      }
+      throw error;
+    }
   }
 
   close(): void {
@@ -239,5 +274,18 @@ export async function connectAttachedClient(
   if (reply.type !== "attached") {
     throw new Error(`attach failed: ${JSON.stringify(reply)}`);
   }
+  peer.connectionId = reply.connectionId;
   return peer;
+}
+
+/** Reads the next message and requires it to be a given type. */
+export async function expectMessage<T extends ServerMessage["type"]>(
+  peer: TestPeer,
+  type: T,
+): Promise<Extract<ServerMessage, { type: T }>> {
+  const message = await peer.next();
+  if (message.type !== type) {
+    throw new Error(`expected ${type}, got ${JSON.stringify(message)}`);
+  }
+  return message as Extract<ServerMessage, { type: T }>;
 }

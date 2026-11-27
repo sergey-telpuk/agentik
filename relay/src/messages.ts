@@ -26,14 +26,32 @@ export type ClientMessage =
   | { type: "attach"; payload: AttachPayload }
   | { type: "frame"; payload: FramePayload };
 
-/** Messages the relay sends to a peer. */
+/**
+ * Messages the relay sends to a peer.
+ *
+ * `connectionId` names one attached client. The relay assigns it on attach;
+ * the device sees it on every frame and presence change for that client, so
+ * it can run one Noise session per client and address replies to exactly
+ * one of them. Clients never see another client's identifier.
+ */
 export type ServerMessage =
   | { type: "challenge"; challenge: string; relayId: string; expiresAt: number }
-  | { type: "registered"; deviceId: string }
-  | { type: "attached"; deviceId: string; devicePresent: boolean }
-  | { type: "peer_state"; present: boolean }
-  | { type: "frame"; data: string }
-  | { type: "error"; code: ErrorCode; message: string };
+  /** To the device: registration accepted, with the clients already attached. */
+  | { type: "registered"; deviceId: string; connections: string[] }
+  /** To a client: attach accepted, with the identifier the relay assigned it. */
+  | { type: "attached"; deviceId: string; connectionId: string; devicePresent: boolean }
+  /**
+   * Presence change. To the device it carries the client's `connectionId`;
+   * to a client it describes the device and has no `connectionId`.
+   */
+  | { type: "peer_state"; present: boolean; connectionId?: string }
+  /**
+   * Opaque ciphertext. To the device it carries the sending client's
+   * `connectionId`; to a client it has none.
+   */
+  | { type: "frame"; data: string; connectionId?: string }
+  /** `connectionId` is set when the error concerns one client connection. */
+  | { type: "error"; code: ErrorCode; message: string; connectionId?: string };
 
 /**
  * Error codes are a closed set so a client can branch on them. The human
@@ -77,10 +95,36 @@ export interface AttachPayload {
   deviceId: Uint8Array;
 }
 
-/** One opaque ciphertext frame to forward to the peer. */
+/**
+ * One opaque ciphertext frame to forward to the peer.
+ *
+ * A device must name the client connection the frame is for. A client must
+ * not name one: the relay tags its frames with the identifier it assigned,
+ * so a client cannot speak as another client.
+ */
 export interface FramePayload {
   data: Uint8Array;
+  connectionId?: string;
 }
+
+/** Length of a connection identifier: 16 random bytes as lowercase hex. */
+export const CONNECTION_ID_LENGTH = 32;
+
+const CONNECTION_ID_PATTERN = /^[0-9a-f]{32}$/;
+
+/** Creates a fresh, unguessable connection identifier. */
+export function newConnectionId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(CONNECTION_ID_LENGTH / 2));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** WebSocket close codes the relay uses, so a peer can tell why it was closed. */
+export const CLOSE_CODES = {
+  /** The same device key registered again on a newer connection. */
+  replaced: 4000,
+  /** A protocol error; the reason is the error code. */
+  protocolError: 4001,
+} as const;
 
 /** Result of parsing: either a value or the reason it was rejected. */
 export type ParseResult<T> =
@@ -243,7 +287,15 @@ function parseFrame(
   if (data.length === 0) {
     return fail("bad_request", "frame is empty");
   }
-  return { ok: true, value: { type: "frame", payload: { data } } };
+
+  const connectionIdRaw = message["connection_id"];
+  if (connectionIdRaw === undefined) {
+    return { ok: true, value: { type: "frame", payload: { data } } };
+  }
+  if (typeof connectionIdRaw !== "string" || !CONNECTION_ID_PATTERN.test(connectionIdRaw)) {
+    return fail("bad_request", "connection_id must be 32 lowercase hex characters");
+  }
+  return { ok: true, value: { type: "frame", payload: { data, connectionId: connectionIdRaw } } };
 }
 
 /** Converts a parsed registration into the structure the verifier re-encodes. */
@@ -265,12 +317,23 @@ export function serializeServerMessage(message: ServerMessage): string {
   return JSON.stringify(message);
 }
 
-/** Builds a frame message carrying opaque ciphertext. */
-export function frameMessage(data: Uint8Array): ServerMessage {
-  return { type: "frame", data: encodeBase64(data) };
+/**
+ * Builds a frame message carrying opaque ciphertext, tagged with the sending
+ * client's connection when it is addressed to the device.
+ */
+export function frameMessage(data: Uint8Array, connectionId?: string): ServerMessage {
+  const message: ServerMessage = { type: "frame", data: encodeBase64(data) };
+  if (connectionId !== undefined) message.connectionId = connectionId;
+  return message;
 }
 
-/** Builds an error message. */
-export function errorMessage(code: ErrorCode, message: string): ServerMessage {
-  return { type: "error", code, message };
+/** Builds an error message, optionally naming the client connection it concerns. */
+export function errorMessage(
+  code: ErrorCode,
+  message: string,
+  connectionId?: string,
+): ServerMessage {
+  const out: ServerMessage = { type: "error", code, message };
+  if (connectionId !== undefined) out.connectionId = connectionId;
+  return out;
 }
