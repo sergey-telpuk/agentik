@@ -1,31 +1,46 @@
 // Command agentik is the local Agentik daemon.
 //
-// At this stage it initialises the pieces that must exist before any remote
-// connection is possible: the device identity and the local database. The
-// relay transport, pairing flow, and agent adapters are added on top of these
-// in later stages.
+// It manages device identity, SQLite persistence, relay connectivity, local
+// pairing confirmation and revocation, and local Codex execution for explicitly
+// permitted projects.
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"syscall"
+	"time"
 
+	"github.com/sergey-telpuk/agentik/daemon/internal/agents/codex"
 	"github.com/sergey-telpuk/agentik/daemon/internal/identity"
+	"github.com/sergey-telpuk/agentik/daemon/internal/pairing"
+	"github.com/sergey-telpuk/agentik/daemon/internal/projects"
+	"github.com/sergey-telpuk/agentik/daemon/internal/runtime"
 	"github.com/sergey-telpuk/agentik/daemon/internal/storage"
+	"github.com/sergey-telpuk/agentik/daemon/internal/transport"
+)
+
+const (
+	defaultRelayURL = "wss://agentik-relay.agentikcl.workers.dev"
+	defaultRelayID  = "agentik-relay"
+	defaultPairTTL  = 10 * time.Minute
 )
 
 func main() {
-	// Signals are handled so that a shutdown in progress can be observed
-	// by the setup steps rather than killing the process mid-write.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
+	if err := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return
 		}
@@ -34,13 +49,77 @@ func main() {
 	}
 }
 
-// run holds the real entry point so it returns errors instead of exiting,
-// which keeps it testable.
-func run(ctx context.Context, args []string, out *os.File) error {
+type projectFlagList []projects.Project
+
+func (p *projectFlagList) String() string { return fmt.Sprintf("%d projects", len(*p)) }
+
+func (p *projectFlagList) Set(value string) error {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return errors.New("project value must not be empty")
+	}
+	id := ""
+	path := raw
+	if eq := strings.IndexByte(raw, '='); eq >= 0 {
+		id = strings.TrimSpace(raw[:eq])
+		path = strings.TrimSpace(raw[eq+1:])
+	}
+	if path == "" {
+		return errors.New("project path must not be empty")
+	}
+	if id == "" {
+		if len(*p) == 0 {
+			id = "default"
+		} else {
+			id = fmt.Sprintf("project_%d", len(*p)+1)
+		}
+	}
+	*p = append(*p, projects.Project{
+		ID:           id,
+		Name:         filepath.Base(path),
+		Root:         path,
+		AllowedAgent: codex.AgentName,
+	})
+	return nil
+}
+
+type lateSender struct {
+	mu sync.RWMutex
+	fn func(ctx context.Context, connectionID string, data []byte) error
+}
+
+func (l *lateSender) set(fn func(ctx context.Context, connectionID string, data []byte) error) {
+	l.mu.Lock()
+	l.fn = fn
+	l.mu.Unlock()
+}
+
+func (l *lateSender) SendFrame(ctx context.Context, connectionID string, data []byte) error {
+	l.mu.RLock()
+	fn := l.fn
+	l.mu.RUnlock()
+	if fn == nil {
+		return errors.New("transport sender not initialized")
+	}
+	return fn(ctx, connectionID, data)
+}
+
+func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("agentik", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
+	fs.SetOutput(errOut)
+
 	dataDir := fs.String("data-dir", "", "directory for identity and database (default: platform data directory)")
-	showStatus := fs.Bool("status", false, "print the device identity and exit")
+	showStatus := fs.Bool("status", false, "print the device identity, diagnostics, and exit")
+	relayURL := fs.String("relay", defaultRelayURL, "relay WSS base URL")
+	relayID := fs.String("relay-id", defaultRelayID, "expected relay identifier")
+	pairOnStart := fs.Bool("pair", false, "print a one-time pairing invitation and QR code on startup")
+	pairTTL := fs.Duration("pair-ttl", defaultPairTTL, "lifetime of newly issued pairing invitations")
+	telegramBotID := fs.Int64("telegram-bot-id", 0, "expected Telegram bot id for initData verification (0 disables)")
+	codexBin := fs.String("codex-bin", "codex", "path or command name for codex CLI")
+
+	var configuredProjects projectFlagList
+	fs.Var(&configuredProjects, "project", "permitted project as id=path or path (repeatable)")
+
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -65,22 +144,292 @@ func run(ctx context.Context, args []string, out *os.File) error {
 		return err
 	}
 
+	cat, err := projects.NewCatalogue(configuredProjects)
+	if err != nil {
+		return err
+	}
+
+	codexAdapter := codex.NewAdapter(codex.Config{Binary: *codexBin})
+	codexDiag := codexAdapter.Diagnose(ctx)
+
 	if created {
 		fmt.Fprintln(out, "Created a new device identity.")
 	}
-	// The public identifier is safe to print; the private keys are not and
-	// are never written to stdout or to logs.
 	fmt.Fprintf(out, "device id:     %s\n", id.DeviceIDString())
 	fmt.Fprintf(out, "data dir:      %s\n", store.Dir())
 	fmt.Fprintf(out, "database:      %s (schema v%d)\n", db.Path(), version)
+	fmt.Fprintf(out, "projects:      %d\n", cat.Len())
+	fmt.Fprintf(out, "codex:         available=%v authenticated=%v", codexDiag.Available, codexDiag.Authenticated)
+	if codexDiag.Version != "" {
+		fmt.Fprintf(out, " version=%q", codexDiag.Version)
+	}
+	fmt.Fprintln(out)
 
 	if *showStatus {
 		return nil
 	}
 
-	fmt.Fprintln(out, "\nThe relay connection is not implemented yet; nothing is listening.")
-	fmt.Fprintln(out, "Press Ctrl+C to exit.")
-	<-ctx.Done()
-	fmt.Fprintln(out, "Shutting down.")
+	normalizedRelay, err := pairing.NormalizeRelayURL(*relayURL)
+	if err != nil {
+		return err
+	}
+
+	var outMu sync.Mutex
+	logLine := func(format string, a ...any) {
+		outMu.Lock()
+		defer outMu.Unlock()
+		fmt.Fprintf(out, format+"\n", a...)
+	}
+
+	pendingNotify := make(chan struct{}, 4)
+	pairSvc, err := pairing.NewService(pairing.Config{
+		DB:            db,
+		Identity:      id,
+		TelegramBotID: *telegramBotID,
+		OnPendingChange: func() {
+			select {
+			case pendingNotify <- struct{}{}:
+			default:
+			}
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	sender := &lateSender{}
+	hub, err := runtime.NewHub(
+		id,
+		pairSvc,
+		runtime.Config{
+			DB:       db,
+			Identity: id,
+			Pairing:  pairSvc,
+			Projects: cat,
+			Agents:   map[string]codex.Adapter{codex.AgentName: codexAdapter},
+		},
+		sender,
+		func(connID string, secErr error) {
+			logLine("secure[%s]: %v", connID, secErr)
+		},
+	)
+	if err != nil {
+		return err
+	}
+	defer hub.Close()
+
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	mgr := hub.Manager()
+	tClient, err := transport.NewClient(transport.Config{
+		RelayURL:        normalizedRelay,
+		Identity:        id,
+		ExpectedRelayID: *relayID,
+		Handlers: transport.Handlers{
+			OnStatus: func(st transport.Status) {
+				if st.LastError != "" {
+					logLine("relay: %s (attempt=%d error=%s)", st.State, st.Attempt, st.LastError)
+				} else {
+					logLine("relay: %s (attempt=%d)", st.State, st.Attempt)
+				}
+			},
+			OnRegistered: func(_ string, connections []string) {
+				mgr.HandleRegistered(runCtx, connections)
+			},
+			OnDisconnected: func() {
+				mgr.HandleDisconnected()
+			},
+			OnPeerState: func(connectionID string, present bool) {
+				mgr.HandlePeerState(runCtx, connectionID, present)
+			},
+			OnFrame: func(connectionID string, data []byte) {
+				mgr.HandleFrame(runCtx, connectionID, data)
+			},
+			OnRelayError: func(code, message, connectionID string) {
+				if connectionID != "" {
+					logLine("relay error[%s]: %s (%s)", connectionID, code, message)
+				} else {
+					logLine("relay error: %s (%s)", code, message)
+				}
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	sender.set(tClient.SendFrame)
+
+	var transportWg sync.WaitGroup
+	transportErrCh := make(chan error, 1)
+	transportWg.Add(1)
+	go func() {
+		defer transportWg.Done()
+		transportErrCh <- tClient.Run(runCtx)
+	}()
+	defer func() {
+		cancelRun()
+		transportWg.Wait()
+	}()
+
+	if *pairOnStart {
+		if err := printNewInvitation(runCtx, pairSvc, normalizedRelay, *pairTTL, &outMu, out); err != nil {
+			return err
+		}
+	}
+
+	logLine("Daemon running. Commands: pair, clients, revoke <id>, quit")
+
+	lineCh := make(chan string)
+	go func() {
+		scanner := bufio.NewScanner(in)
+		for scanner.Scan() {
+			select {
+			case lineCh <- scanner.Text():
+			case <-runCtx.Done():
+				return
+			}
+		}
+		close(lineCh)
+	}()
+
+	var currentPending *pairing.PendingConfirmation
+	showPrompt := func() {
+		if currentPending != nil {
+			return
+		}
+		list := pairSvc.ListPending()
+		if len(list) == 0 {
+			return
+		}
+		p := list[0]
+		currentPending = &p
+		logLine(
+			"\nPending pairing confirmation:\n  id:          %s\n  fingerprint: %s\n  telegram:    %d (%s)\n  label:       %s\nConfirm this phone? [y/N]: ",
+			p.ID, p.Fingerprint, p.TelegramUserID, p.TelegramUsername, p.Label,
+		)
+	}
+
+	for {
+		showPrompt()
+		select {
+		case <-runCtx.Done():
+			logLine("Shutting down.")
+			return nil
+		case tErr := <-transportErrCh:
+			if tErr != nil && !errors.Is(tErr, context.Canceled) {
+				return tErr
+			}
+			return nil
+		case <-pendingNotify:
+			showPrompt()
+		case line, ok := <-lineCh:
+			if !ok {
+				// EOF on stdin (e.g. non-interactive run): stay alive until ctx.Done().
+				lineCh = nil
+				continue
+			}
+			cmd := strings.TrimSpace(line)
+			if currentPending != nil {
+				switch strings.ToLower(cmd) {
+				case "y", "yes":
+					trusted, err := pairSvc.ConfirmPairing(runCtx, currentPending.ID, "")
+					if err != nil {
+						logLine("pair confirm failed: %v", err)
+					} else {
+						hub.NotifyPeerPaired(runCtx, trusted.NoisePublicKey, "paired")
+						logLine("Paired client #%d (%s).", trusted.ID, trusted.Fingerprint)
+					}
+					currentPending = nil
+					continue
+				case "n", "no", "":
+					if err := pairSvc.RejectPairing(runCtx, currentPending.ID); err != nil {
+						logLine("pair reject failed: %v", err)
+					} else {
+						hub.NotifyPeerPaired(runCtx, currentPending.ClientNoisePublicKey, "rejected")
+						logLine("Rejected pending pairing %s.", currentPending.ID)
+					}
+					currentPending = nil
+					continue
+				}
+			}
+
+			switch {
+			case cmd == "" || cmd == "help":
+				logLine("Commands: pair, clients, revoke <id>, quit")
+			case cmd == "quit" || cmd == "exit":
+				logLine("Shutting down.")
+				return nil
+			case cmd == "pair":
+				if err := printNewInvitation(runCtx, pairSvc, normalizedRelay, *pairTTL, &outMu, out); err != nil {
+					logLine("pair error: %v", err)
+				}
+			case cmd == "clients":
+				clients, err := pairSvc.ListTrustedClients(runCtx)
+				if err != nil {
+					logLine("clients error: %v", err)
+					continue
+				}
+				if len(clients) == 0 {
+					logLine("No paired clients.")
+					continue
+				}
+				for _, c := range clients {
+					status := "active"
+					if c.RevokedAt != nil {
+						status = "revoked"
+					}
+					logLine("#%d %s (%s) label=%q telegram=%d", c.ID, c.Fingerprint, status, c.Label, c.TelegramUserID)
+				}
+			case strings.HasPrefix(cmd, "revoke "):
+				idStr := strings.TrimSpace(strings.TrimPrefix(cmd, "revoke "))
+				clientID, err := strconv.ParseInt(idStr, 10, 64)
+				if err != nil {
+					logLine("invalid client id %q", idStr)
+					continue
+				}
+				clients, err := pairSvc.ListTrustedClients(runCtx)
+				if err != nil {
+					logLine("revoke error: %v", err)
+					continue
+				}
+				var target []byte
+				for _, c := range clients {
+					if c.ID == clientID {
+						target = c.NoisePublicKey
+						break
+					}
+				}
+				if len(target) == 0 {
+					logLine("client #%d not found", clientID)
+					continue
+				}
+				if err := hub.RevokePeer(runCtx, target); err != nil {
+					logLine("revoke failed: %v", err)
+				} else {
+					logLine("Revoked client #%d.", clientID)
+				}
+			default:
+				logLine("Unknown command %q. Try: pair, clients, revoke <id>, quit", cmd)
+			}
+		}
+	}
+}
+
+func printNewInvitation(
+	ctx context.Context,
+	pairSvc *pairing.Service,
+	relayURL string,
+	ttl time.Duration,
+	mu *sync.Mutex,
+	out io.Writer,
+) error {
+	inv, err := pairSvc.CreateInvitation(ctx, relayURL, ttl)
+	if err != nil {
+		return err
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	fmt.Fprintf(out, "\nPairing invitation (expires %s):\n%s\n\n%s\n", inv.ExpiresAt.Format(time.RFC3339), inv.QR, inv.InvitationText)
 	return nil
 }
