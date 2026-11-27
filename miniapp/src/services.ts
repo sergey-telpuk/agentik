@@ -5,6 +5,8 @@ import { readScenario, scenarioData, type ScenarioName } from "./api/mock/scenar
 import type { AgentikApi, Diagnostics, StorageAvailability } from "./api/types";
 import { decodeBase32 } from "./encoding";
 import { RelayClient } from "./relay/client";
+import { readWebRtcConfig } from "./webrtc/config";
+import { openDataChannelLink } from "./webrtc/link";
 import { noiseChannelFactory } from "./secure/noise";
 import type { KeyValueBackend } from "./storage/backend";
 import { PhoneIdentityStore } from "./storage/phoneIdentity";
@@ -65,7 +67,7 @@ async function describeOpenedStore(
   return { ...storageFromPersistence(store), secureStorage, deviceStorage };
 }
 
-/** Creates a relay client for a pinned device. */
+/** Creates the signaling client for a pinned device. It carries SDP and ICE only. */
 export function relayClientFor(device: PinnedDevice): RelayClient {
   const deviceId = decodeBase32(device.deviceId);
   if (deviceId === null) throw new Error("pinned device id is not valid");
@@ -81,9 +83,10 @@ export function createDefaultServices(search: string = window.location.search): 
   return choice.kind === "mock" ? createMockServices(choice.scenario) : createLiveServices();
 }
 
-/** Real Telegram storage, relay, Noise session and inner protocol. */
+/** Real Telegram storage, relay signaling, WebRTC DataChannel, Noise session and inner protocol. */
 function createLiveServices(): AppServices {
   const runtime = createTelegramRuntime();
+  const webrtc = readWebRtcConfig(import.meta.env as unknown as Record<string, string | undefined>);
   const backends = createTelegramBackends(runtime);
   return {
     runtime,
@@ -96,6 +99,15 @@ function createLiveServices(): AppServices {
         appVersion: APP_VERSION,
         openIdentityStore: () => PhoneIdentityStore.open(backends),
         createRelayClient: relayClientFor,
+        openLink: ({ signaling, signal }) =>
+          openDataChannelLink({
+            signaling,
+            signal,
+            createPeerConnection: (config) => new RTCPeerConnection(config),
+            extraIceServers: webrtc.stunUrls.length > 0 ? [{ urls: webrtc.stunUrls }] : [],
+            iceServersWaitMs: webrtc.iceServersWaitMs,
+            connectTimeoutMs: webrtc.connectTimeoutMs,
+          }),
         secureChannel: noiseChannelFactory,
         describeStorage: () => describeOpenedStore(store, backends),
       }),

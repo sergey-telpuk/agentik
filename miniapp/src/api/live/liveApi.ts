@@ -1,6 +1,7 @@
 /**
- * `AgentikApi` over the real stack: Telegram-backed pins, the relay client,
- * the Noise XX session and the inner JSON protocol (AGENTIK.md sections 5-7).
+ * `AgentikApi` over the real stack: Telegram-backed pins, relay signaling, a
+ * WebRTC DataChannel, the Noise XX session over it and the inner JSON
+ * protocol (AGENTIK.md sections 5-7).
  *
  * Calls that reach the computer need the synchronised session of an open
  * `connect`; without one they fail with `not_connected` instead of queueing.
@@ -28,6 +29,7 @@ import type { SecureChannelFactory } from "../../secure/seam";
 import type { PhoneIdentityStore } from "../../storage/phoneIdentity";
 import type { PinnedDevice, PinnedDeviceStore, StoreErrorCode } from "../../storage/pinnedDevices";
 import type { TelegramRuntime } from "../../telegram/runtime";
+import { detectWebRtc, type WebRtcSupport } from "../../webrtc/support";
 import { conversationsFromTasks, mergeConversations } from "../conversations";
 import { isFinalState } from "../taskState";
 import {
@@ -45,7 +47,7 @@ import {
   type TaskSummary,
   type TaskUpdate,
 } from "../types";
-import { ConnectAttempt, type ComputerOutcome, type PendingPairing } from "./connection";
+import { ConnectAttempt, type ComputerOutcome, type OpenLink, type PendingPairing } from "./connection";
 import {
   agentsFromInfo,
   apiErrorFrom,
@@ -63,7 +65,12 @@ export interface LiveApiOptions {
   readonly store: PinnedDeviceStore;
   readonly runtime: TelegramRuntime;
   readonly openIdentityStore: () => Promise<PhoneIdentityStore>;
+  /** The signaling connection (SDP and ICE only; no application data). */
   readonly createRelayClient: (device: PinnedDevice) => RelayClient;
+  /** Opens the WebRTC DataChannel that carries all application data. */
+  readonly openLink: OpenLink;
+  /** Whether this WebView can open a DataChannel. Defaults to feature detection. */
+  readonly webRtcSupport?: () => WebRtcSupport;
   readonly secureChannel: SecureChannelFactory;
   /** Storage facts shown in diagnostics; probing may touch Telegram storage. */
   readonly describeStorage: () => Promise<Diagnostics["storage"]>;
@@ -72,7 +79,7 @@ export interface LiveApiOptions {
   readonly rpcTimeoutMs?: number;
   /** How long the computer may be absent behind an attached relay before `connect` fails. */
   readonly offlineGraceMs?: number;
-  /** Failed relay attempts in a row after which `connect` fails. */
+  /** Failed signaling attempts in a row after which `connect` fails. */
   readonly maxRelayAttempts?: number;
 }
 
@@ -304,6 +311,8 @@ export function createLiveApi(options: LiveApiOptions): AgentikApi {
           runtime: options.runtime,
           secureChannel: options.secureChannel,
           createRelayClient: options.createRelayClient,
+          openLink: options.openLink,
+          webRtcSupport: options.webRtcSupport ?? (() => detectWebRtc()),
           loadIdentity: async () => {
             const store = await options.openIdentityStore();
             const loaded = await store.getOrCreate();

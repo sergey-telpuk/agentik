@@ -74,7 +74,7 @@ export function connectionText(state: ConnectionState | null, computerName: stri
   if (state === null) return { tone: "neutral", label: "not connected", detail: "No secure session yet." };
   switch (state.phase) {
     case "connecting":
-      return { tone: "info", label: "connecting", detail: "Reaching the relay…" };
+      return { tone: "info", label: "connecting", detail: "Opening a direct data channel to the computer (the relay only helps set it up)…" };
     case "handshaking":
       return { tone: "info", label: "verifying", detail: "Checking the computer's key against the pinned one…" };
     case "awaiting_local_approval":

@@ -1,20 +1,23 @@
 /**
- * The relay connection: the ONLY module that knows the relay wire format
+ * The signaling connection: the ONLY module that knows the relay wire format
  * (`relay/src/messages.ts`, `relay/src/limits.ts`).
  *
- * It opens a WebSocket to `/v1/connect?device=<base32>`, attaches to one
- * computer, maintains keepalive pings, reconnects with exponential backoff,
- * and exposes opaque encrypted frames through `FrameTransport`. It never
- * interprets frame contents: confidentiality and authentication come from the
- * Noise session layered on top (`src/secure/noise.ts`).
+ * The relay carries WebRTC signaling and nothing else. This client opens a
+ * WebSocket to `/v1/connect?device=<base32>`, attaches to one computer,
+ * maintains keepalive pings, reconnects with exponential backoff, and
+ * exchanges opaque signaling payloads (SDP offer and answer, ICE candidates,
+ * the ICE server list). Application data never crosses it: it has no method
+ * that sends anything but a signal, and inbound messages of any other kind
+ * (including a legacy `frame`) are ignored. Confidentiality and authentication
+ * of the data path come from the Noise session over the DataChannel
+ * (`src/secure/noise.ts`).
  *
  * Reconnecting never resumes anything. A new socket is a new connection, so
- * whoever sits above must run a fresh handshake (AGENTIK.md section 6.1).
- * Frames are therefore never queued across a reconnect.
+ * signaling restarts from a fresh offer (AGENTIK.md section 6.1). Signals are
+ * therefore never queued across a reconnect.
  */
 
 import { decodeBase64, encodeBase64 } from "../encoding";
-import type { FrameTransport } from "./frame-transport";
 
 /** Envelope version sent in `attach`. */
 export const ENVELOPE_VERSION = 1;
@@ -37,7 +40,14 @@ export const RELAY_CLOSE_CODES = {
 /** Messages this client sends. */
 type OutboundMessage =
   | { type: "attach"; version: number; device_id: string }
-  | { type: "frame"; data: string };
+  | { type: "signal"; kind: SignalKind; data: string };
+
+/** Signaling payload kinds. The phone offers; the computer answers. */
+export type SignalKind = "offer" | "answer" | "ice" | "ice_servers";
+
+/** What the phone may send, and what it may receive, per `relay/src/messages.ts`. */
+export const PHONE_SIGNAL_KINDS: readonly SignalKind[] = ["offer", "ice"];
+export const COMPUTER_SIGNAL_KINDS: readonly SignalKind[] = ["answer", "ice", "ice_servers"];
 
 /** Known relay error codes from `relay/src/messages.ts`. */
 export type RelayKnownErrorCode =
@@ -62,7 +72,7 @@ const FATAL_ERROR_CODES: ReadonlySet<string> = new Set(["bad_request", "unsuppor
 type InboundMessage =
   | { type: "attached"; devicePresent: boolean; connectionId: string }
   | { type: "peer_state"; present: boolean }
-  | { type: "frame"; data: Uint8Array }
+  | { type: "signal"; kind: SignalKind; data: Uint8Array }
   | { type: "error"; code: RelayErrorCode }
   | { type: "pong" };
 
@@ -95,10 +105,12 @@ function parseInbound(text: string): InboundMessage | null {
       return typeof message["present"] === "boolean"
         ? { type: "peer_state", present: message["present"] }
         : null;
-    case "frame": {
+    case "signal": {
+      const kind = message["kind"];
+      if (typeof kind !== "string" || !(COMPUTER_SIGNAL_KINDS as readonly string[]).includes(kind)) return null;
       if (typeof message["data"] !== "string") return null;
       const data = decodeBase64(message["data"]);
-      return data !== null && data.length > 0 ? { type: "frame", data } : null;
+      return data !== null && data.length > 0 ? { type: "signal", kind: kind as SignalKind, data } : null;
     }
     case "error":
       return typeof message["code"] === "string" ? { type: "error", code: message["code"] } : null;
@@ -165,7 +177,7 @@ export type RelayState =
   | "stopped"
   /** Opening the socket or waiting for the relay to accept the attach. */
   | "connecting"
-  /** Attached: frames can flow. Says nothing about the computer being online. */
+  /** Attached: signals can flow. Says nothing about the computer being online. */
   | "connected"
   /** The connection dropped; a retry is scheduled. */
   | "reconnecting"
@@ -184,12 +196,12 @@ export interface RelayStatus {
    * Incremented each time the device becomes available on the current socket
    * (either at `attached` with `devicePresent: true` or upon `peer_state`
    * with `present: true`, including when a daemon re-registers). Consumers use
-   * this to start a fresh Noise handshake.
+   * this to start a fresh negotiation.
    */
   readonly peerEpoch: number;
   /** Milliseconds until the next retry while `reconnecting`. */
   readonly nextRetryInMs: number | null;
-  /** The last relay error code, if any. Never contains frame contents. */
+  /** The last relay error code, if any. Never contains signaling contents. */
   readonly lastError: string | null;
   /** The WebSocket close code of the most recent close, if any. */
   readonly lastCloseCode: number | null;
@@ -214,12 +226,12 @@ export interface RelayClientOptions {
   readonly keepaliveIntervalMs?: number;
   /** How long to wait for `KEEPALIVE_PONG` after sending a ping. */
   readonly keepaliveTimeoutMs?: number;
-  /** Largest frame this client will send. */
-  readonly maxFrameBytes?: number;
+  /** Largest signaling payload this client will send or accept. */
+  readonly maxSignalBytes?: number;
 }
 
-/** Matches `LIMITS.maxFrameBytes` in `relay/src/limits.ts`. */
-export const DEFAULT_MAX_FRAME_BYTES = 32 * 1024;
+/** Matches `LIMITS.maxSignalBytes` in `relay/src/limits.ts`. */
+export const DEFAULT_MAX_SIGNAL_BYTES = 32 * 1024;
 
 export const DEFAULT_KEEPALIVE_INTERVAL_MS = 20_000;
 export const DEFAULT_KEEPALIVE_TIMEOUT_MS = 10_000;
@@ -231,10 +243,17 @@ export class RelayNotConnectedError extends Error {
   }
 }
 
-export class FrameTooLargeError extends Error {
+export class SignalTooLargeError extends Error {
   constructor(readonly limit: number) {
-    super(`Frame exceeds the ${limit}-byte limit`);
-    this.name = "FrameTooLargeError";
+    super(`Signal exceeds the ${limit}-byte limit`);
+    this.name = "SignalTooLargeError";
+  }
+}
+
+export class SignalKindError extends Error {
+  constructor(readonly kind: string) {
+    super(`The phone may not send a "${kind}" signal`);
+    this.name = "SignalKindError";
   }
 }
 
@@ -249,11 +268,11 @@ const INITIAL_STATUS: RelayStatus = {
   lastCloseCode: null,
 };
 
-export class RelayClient implements FrameTransport {
+export class RelayClient {
   readonly #options: Required<Omit<RelayClientOptions, "createSocket">> & {
     createSocket: (url: string) => WebSocketLike;
   };
-  readonly #frameHandlers = new Set<(frame: Uint8Array) => void>();
+  readonly #signalHandlers = new Set<(kind: SignalKind, data: Uint8Array) => void>();
   readonly #statusHandlers = new Set<(status: RelayStatus) => void>();
 
   #status: RelayStatus = INITIAL_STATUS;
@@ -280,7 +299,7 @@ export class RelayClient implements FrameTransport {
       stableAfterMs: options.stableAfterMs ?? 10_000,
       keepaliveIntervalMs: options.keepaliveIntervalMs ?? DEFAULT_KEEPALIVE_INTERVAL_MS,
       keepaliveTimeoutMs: options.keepaliveTimeoutMs ?? DEFAULT_KEEPALIVE_TIMEOUT_MS,
-      maxFrameBytes: options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
+      maxSignalBytes: options.maxSignalBytes ?? DEFAULT_MAX_SIGNAL_BYTES,
     };
   }
 
@@ -294,9 +313,10 @@ export class RelayClient implements FrameTransport {
     return () => this.#statusHandlers.delete(handler);
   }
 
-  onFrame(handler: (frame: Uint8Array) => void): () => void {
-    this.#frameHandlers.add(handler);
-    return () => this.#frameHandlers.delete(handler);
+  /** Subscribes to signaling payloads from the computer. Returns an unsubscribe function. */
+  onSignal(handler: (kind: SignalKind, data: Uint8Array) => void): () => void {
+    this.#signalHandlers.add(handler);
+    return () => this.#signalHandlers.delete(handler);
   }
 
   /** Starts connecting. Calling it while already running does nothing. */
@@ -323,16 +343,18 @@ export class RelayClient implements FrameTransport {
   }
 
   /**
-   * Sends one opaque frame. Throws rather than queueing when not attached:
-   * a frame held across a reconnect would belong to a dead Noise session.
+   * Sends one signaling payload. Throws rather than queueing when not
+   * attached: a signal held across a reconnect would belong to a dead
+   * negotiation. Only the kinds a phone may send are accepted.
    */
-  sendFrame(frame: Uint8Array): void {
+  sendSignal(kind: SignalKind, data: Uint8Array): void {
+    if (!(PHONE_SIGNAL_KINDS as readonly string[]).includes(kind)) throw new SignalKindError(kind);
     if (!this.#attached || this.#socket === null) throw new RelayNotConnectedError();
-    if (frame.length === 0) throw new Error("Frame is empty");
-    if (frame.length > this.#options.maxFrameBytes) {
-      throw new FrameTooLargeError(this.#options.maxFrameBytes);
+    if (data.length === 0) throw new Error("Signal is empty");
+    if (data.length > this.#options.maxSignalBytes) {
+      throw new SignalTooLargeError(this.#options.maxSignalBytes);
     }
-    this.#socket.send(serialize({ type: "frame", data: encodeBase64(frame) }));
+    this.#socket.send(serialize({ type: "signal", kind, data: encodeBase64(data) }));
   }
 
   // -- internals ------------------------------------------------------------
@@ -421,10 +443,10 @@ export class RelayClient implements FrameTransport {
           });
         }
         return;
-      case "frame":
-        // Frames are only meaningful from an attached connection.
-        if (!this.#attached || message.data.length > this.#options.maxFrameBytes) return;
-        for (const handler of this.#frameHandlers) handler(message.data);
+      case "signal":
+        // Signals are only meaningful from an attached connection.
+        if (!this.#attached || message.data.length > this.#options.maxSignalBytes) return;
+        for (const handler of this.#signalHandlers) handler(message.kind, message.data);
         return;
       case "pong":
         this.#clearTimer("keepaliveTimeout");

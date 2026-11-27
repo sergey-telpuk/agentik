@@ -12,6 +12,8 @@ import { PhoneIdentityStore } from "../../storage/phoneIdentity";
 import { PinnedDeviceStore, type PinnedDevice } from "../../storage/pinnedDevices";
 import { noTelegramRuntime, type TelegramRuntime } from "../../telegram/runtime";
 import type { AgentikApi, ConnectionState, TaskEvent, TaskUpdate } from "../types";
+import type { WebRtcSupport } from "../../webrtc/support";
+import type { OpenLink } from "./connection";
 import { createLiveApi } from "./liveApi";
 import {
   attachingRelay,
@@ -62,6 +64,8 @@ function liveApi(
   f: Fixture,
   wiring: {
     readonly createRelayClient: (device: PinnedDevice) => RelayClient;
+    readonly openLink?: OpenLink;
+    readonly webRtcSupport?: () => WebRtcSupport;
     readonly secureChannel: SecureChannelFactory;
     readonly runtime?: TelegramRuntime;
     readonly rpcTimeoutMs?: number;
@@ -74,6 +78,8 @@ function liveApi(
     runtime: wiring.runtime ?? noTelegramRuntime,
     openIdentityStore: () => PhoneIdentityStore.open({ secure: f.backend, device: null }),
     createRelayClient: wiring.createRelayClient,
+    openLink: wiring.openLink ?? attachingRelay().openLink,
+    webRtcSupport: wiring.webRtcSupport ?? (() => ({ supported: true })),
     secureChannel: wiring.secureChannel,
     describeStorage: () =>
       Promise.resolve({ secureStorage: "available", deviceStorage: "unavailable", active: "secure", note: null }),
@@ -149,7 +155,7 @@ describe("live AgentikApi: secure connection and pairing", () => {
     if (!pinned.ok) throw new Error(pinned.message);
     const daemon = await noiseDaemon(f.invitation.deviceIdText, f.keys, paired(() => undefined));
     daemons.push(daemon);
-    const api = liveApi(f, { createRelayClient: daemon.relay.createRelayClient, secureChannel: noiseChannelFactory, runtime: telegram });
+    const api = liveApi(f, { ...daemon.relay.wiring, secureChannel: noiseChannelFactory, runtime: telegram });
 
     const { states } = track(api, f.invitation.deviceIdText);
     await until(() => last(states)?.phase === "ready", "ready");
@@ -163,6 +169,11 @@ describe("live AgentikApi: secure connection and pairing", () => {
     const onWire = daemon.relay.frames.map((frame) => new TextDecoder().decode(frame)).join("\n");
     expect(onWire).not.toContain("auth_date");
     expect(onWire).not.toContain("device.info");
+    // The relay saw signaling and nothing else, and was released once the channel was up.
+    expect(daemon.relay.frames.length).toBeGreaterThan(0);
+    expect(daemon.relay.strays).toEqual([]);
+    expect(new Set(daemon.relay.signals.map((x) => x.kind))).toEqual(new Set(["offer"]));
+    expect(daemon.relay.sockets.at(-1)?.closed).toBe(true);
 
     const listed = await f.store.list();
     expect(listed.ok && listed.value[0]?.state).toBe("confirmed");
@@ -182,7 +193,7 @@ describe("live AgentikApi: secure connection and pairing", () => {
       return undefined;
     });
     daemons.push(daemon);
-    const api = liveApi(f, { createRelayClient: daemon.relay.createRelayClient, secureChannel: noiseChannelFactory });
+    const api = liveApi(f, { ...daemon.relay.wiring, secureChannel: noiseChannelFactory });
 
     const pairedComputer = await api.pairComputer(f.invitation);
     expect(pairedComputer.ok && pairedComputer.value.status).toBe("pending_confirmation");
@@ -238,7 +249,7 @@ describe("live AgentikApi: secure connection and pairing", () => {
       return undefined;
     });
     daemons.push(daemon);
-    const api = liveApi(f, { createRelayClient: daemon.relay.createRelayClient, secureChannel: noiseChannelFactory });
+    const api = liveApi(f, { ...daemon.relay.wiring, secureChannel: noiseChannelFactory });
     await api.pairComputer(f.invitation);
 
     const { states } = track(api, f.invitation.deviceIdText);
@@ -257,7 +268,7 @@ describe("live AgentikApi: secure connection and pairing", () => {
     await pinConfirmed(f);
     const impostor = await noiseDaemon(f.invitation.deviceIdText, await generateNoiseKeyPair(), paired(() => undefined));
     daemons.push(impostor);
-    const api = liveApi(f, { createRelayClient: impostor.relay.createRelayClient, secureChannel: noiseChannelFactory });
+    const api = liveApi(f, { ...impostor.relay.wiring, secureChannel: noiseChannelFactory });
 
     const { states } = track(api, f.invitation.deviceIdText);
     await until(() => last(states)?.phase === "failed", "failed");
@@ -274,7 +285,7 @@ describe("live AgentikApi: secure connection and pairing", () => {
     await pinConfirmed(f);
     const relay = attachingRelay({ devicePresent: false });
     const api = liveApi(f, {
-      createRelayClient: relay.createRelayClient,
+      ...relay.wiring,
       secureChannel: plainDaemon(() => undefined).secureChannel,
       offlineGraceMs: 30,
     });
@@ -585,7 +596,7 @@ describe("live AgentikApi: tasks over the inner protocol", () => {
       }),
     );
     const relay = attachingRelay();
-    const api = liveApi(f, { createRelayClient: relay.createRelayClient, secureChannel: daemon.secureChannel, rpcTimeoutMs: 40 });
+    const api = liveApi(f, { ...relay.wiring, secureChannel: daemon.secureChannel, rpcTimeoutMs: 40 });
     const id = f.invitation.deviceIdText;
     const { states } = track(api, id);
     await until(() => last(states)?.phase === "ready", "ready");
@@ -605,11 +616,16 @@ describe("live AgentikApi: tasks over the inner protocol", () => {
     cleanups.push(api.streamEvents(id, "task-1111-2222", 0, (u) => updates.push(u)));
     await until(() => updates.some((u) => u.events.some((e) => e.seq === 1)), "first event");
 
-    // The computer drops off the relay and comes back: a fresh handshake, then catch-up.
+    // The DataChannel drops: the attempt fails with the reason and does not
+    // quietly retry (nor reach for the relay). Retrying opens a fresh link and a
+    // fresh handshake, then catches up.
     current = task({ state: "cancelled", error_message: "cancelled by user" });
-    relay.peerState(false);
-    await until(() => last(states)?.phase === "connecting", "connection lost");
-    relay.peerState(true);
+    relay.drop("test: channel closed");
+    await until(() => last(states)?.phase === "failed", "connection lost");
+    expect(last(states)).toMatchObject({ phase: "failed", reason: "link_lost", retryable: true });
+    expect(relay.strays).toEqual([]);
+    const retry = track(api, id);
+    await until(() => last(retry.states)?.phase === "ready", "ready again");
     await until(() => updates.at(-1)?.task.state === "cancelled", "cancelled after reconnect");
 
     expect(daemon.sessions).toHaveLength(2);
@@ -748,7 +764,7 @@ describe("live AgentikApi: recovering a corrupt phone identity", () => {
     const daemon = plainDaemon(paired(() => undefined));
     const recorded = recordingChannel(daemon);
     const relay = attachingRelay();
-    const api = liveApi(f, { createRelayClient: relay.createRelayClient, secureChannel: recorded.channel });
+    const api = liveApi(f, { ...relay.wiring, secureChannel: recorded.channel });
     const id = f.invitation.deviceIdText;
 
     const broken = track(api, id);
@@ -1076,5 +1092,123 @@ describe("live AgentikApi: agent selection and conversation listing", () => {
     expect(listed.ok && listed.value.source).toBe("local");
     expect(listed.ok && listed.value.warning).toContain("failed to list sessions");
     expect(listed.ok && listed.value.conversations.map((c) => c.sessionId)).toEqual(["sess-new"]);
+  });
+});
+
+describe("live AgentikApi: the data path is WebRTC only, with no relay fallback", () => {
+  function expectFailure(states: readonly ConnectionState[], reason: string, retryable: boolean): void {
+    const failed = last(states);
+    expect(failed?.phase === "failed" && failed.reason).toBe(reason);
+    expect(failed?.phase === "failed" && failed.retryable).toBe(retryable);
+  }
+
+  it("fails with webrtc_unsupported when the WebView has no RTCPeerConnection, without contacting the relay", async () => {
+    const f = await fixture();
+    await pinConfirmed(f);
+    const relay = attachingRelay();
+    const api = liveApi(f, {
+      ...relay.wiring,
+      secureChannel: plainDaemon(paired(() => undefined)).secureChannel,
+      webRtcSupport: () => ({ supported: false, reason: "this WebView has no RTCPeerConnection" }),
+    });
+
+    const { states } = track(api, f.invitation.deviceIdText);
+    await until(() => last(states)?.phase === "failed", "failed");
+    expectFailure(states, "webrtc_unsupported", false);
+    expect(last(states)).toMatchObject({ message: expect.stringContaining("no other path") });
+    expect(relay.sockets).toHaveLength(0);
+    expect(relay.links).toHaveLength(0);
+  });
+
+  it.each([
+    ["ice_failed", "ICE failed: no candidate pair", "ice_failed"],
+    ["timeout", "the data channel did not open within 20 s (no candidate pair)", "ice_failed"],
+  ] as const)(
+    "reports %s with its reason, retries nothing, and sends no application frame through the relay",
+    async (code, message, reason) => {
+      const f = await fixture();
+      await pinConfirmed(f);
+      const relay = attachingRelay({ link: { kind: "fail", code, message } });
+      const daemon = plainDaemon(paired(() => undefined));
+      const api = liveApi(f, { ...relay.wiring, secureChannel: daemon.secureChannel });
+
+      const { states } = track(api, f.invitation.deviceIdText);
+      await until(() => last(states)?.phase === "failed", "failed");
+      expectFailure(states, reason, true);
+      expect(last(states)).toMatchObject({ message: expect.stringContaining(message) });
+      // Let any (wrong) retry or fallback happen before asserting it did not.
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(daemon.sessions).toHaveLength(0);
+      expect(daemon.requests).toEqual([]);
+      expect(relay.frames).toEqual([]);
+      // The relay carried the offer and not one byte more.
+      expect(relay.strays).toEqual([]);
+      expect(relay.signals.map((x) => x.kind)).toEqual(["offer"]);
+      expect(relay.sockets).toHaveLength(1);
+      expect(relay.sockets[0]?.closed).toBe(true);
+    },
+  );
+
+  it("reports a relay that cannot carry the signaling as relay_unreachable", async () => {
+    const f = await fixture();
+    await pinConfirmed(f);
+    const relay = attachingRelay({ link: { kind: "fail", code: "signaling", message: "no attach" } });
+    const api = liveApi(f, { ...relay.wiring, secureChannel: plainDaemon(() => undefined).secureChannel });
+    const { states } = track(api, f.invitation.deviceIdText);
+    await until(() => last(states)?.phase === "failed", "failed");
+    expectFailure(states, "relay_unreachable", true);
+  });
+
+  it("a link that never settles stays connecting and is aborted when the attempt stops", async () => {
+    const f = await fixture();
+    await pinConfirmed(f);
+    const relay = attachingRelay({ link: { kind: "hang" } });
+    const api = liveApi(f, { ...relay.wiring, secureChannel: plainDaemon(() => undefined).secureChannel });
+    const { states, stop } = track(api, f.invitation.deviceIdText);
+    await until(() => relay.signals.length === 1, "the offer");
+    expect(phases(states)).toEqual(["connecting"]);
+    stop();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(phases(states)).toEqual(["connecting"]);
+    expect(relay.frames).toEqual([]);
+    expect(relay.strays).toEqual([]);
+  });
+
+  it("fails the handshake, and sends no request, when the DTLS fingerprints the two sides saw differ", async () => {
+    const f = await fixture();
+    await pinConfirmed(f);
+    const swapped = new Uint8Array(32).fill(0xee);
+    const daemon = await noiseDaemon(f.invitation.deviceIdText, f.keys, paired(() => undefined), {
+      computerFingerprintView: swapped,
+    });
+    daemons.push(daemon);
+    const api = liveApi(f, { ...daemon.relay.wiring, secureChannel: noiseChannelFactory, runtime: telegram });
+
+    const { states } = track(api, f.invitation.deviceIdText);
+    await until(() => last(states)?.phase === "failed", "failed");
+    expectFailure(states, "handshake_failed", true);
+    expect(last(states)).toMatchObject({ message: expect.stringContaining("fingerprints") });
+    // Message 1 went out; the phone's identity (message 3) and every request did not.
+    expect(daemon.relay.frames).toHaveLength(1);
+    expect(daemon.requests).toEqual([]);
+    expect(daemon.relay.strays).toEqual([]);
+  });
+
+  it("ends the attempt as link_lost when the open channel closes, and does not reopen it by itself", async () => {
+    const f = await fixture();
+    await pinConfirmed(f);
+    const relay = attachingRelay();
+    const api = liveApi(f, { ...relay.wiring, secureChannel: plainDaemon(paired(() => undefined)).secureChannel });
+    const { states } = track(api, f.invitation.deviceIdText);
+    await until(() => last(states)?.phase === "ready", "ready");
+
+    relay.drop("test");
+    await until(() => last(states)?.phase === "failed", "failed");
+    expectFailure(states, "link_lost", true);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(relay.links).toHaveLength(1);
+    expect(relay.sockets).toHaveLength(1);
+    expect(relay.strays).toEqual([]);
   });
 });
