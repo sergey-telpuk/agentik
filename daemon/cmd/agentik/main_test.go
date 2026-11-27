@@ -76,6 +76,20 @@ func TestRunStatusAndInvalidProject(t *testing.T) {
 	}
 }
 
+func TestRunVersion(t *testing.T) {
+	old := version
+	t.Cleanup(func() { version = old })
+	version = "sha-abc1234"
+
+	var out, errOut bytes.Buffer
+	if err := run(context.Background(), []string{"-version"}, strings.NewReader(""), &out, &errOut); err != nil {
+		t.Fatalf("version failed: %v (stderr=%s)", err, errOut.String())
+	}
+	if got, want := out.String(), "agentik sha-abc1234\n"; got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+}
+
 func TestRunStatusListsDetectedAgents(t *testing.T) {
 	bin := t.TempDir()
 	write := func(name, body string) {

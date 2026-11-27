@@ -32,6 +32,10 @@ import (
 	"github.com/sergey-telpuk/agentik/daemon/internal/transport"
 )
 
+// version is the release identifier. Release builds override it with
+// -ldflags "-X main.version=<version>".
+var version = "dev"
+
 const (
 	defaultRelayURL = "wss://agentik-relay.agentikcl.workers.dev"
 	defaultRelayID  = "agentik-relay"
@@ -111,6 +115,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	fs.SetOutput(errOut)
 
 	dataDir := fs.String("data-dir", "", "directory for identity and database (default: platform data directory)")
+	showVersion := fs.Bool("version", false, "print the daemon version and exit")
 	showStatus := fs.Bool("status", false, "print the device identity, diagnostics, and exit")
 	relayURL := fs.String("relay", defaultRelayURL, "relay WSS base URL")
 	relayID := fs.String("relay-id", defaultRelayID, "expected relay identifier")
@@ -125,6 +130,10 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	fs.Var(&configuredProjects, "project", "permitted project as id=path or path (repeatable)")
 
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *showVersion {
+		_, err := fmt.Fprintf(out, "agentik %s\n", version)
 		return err
 	}
 
@@ -143,7 +152,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	}
 	defer db.Close()
 
-	version, err := db.SchemaVersion(ctx)
+	schemaVersion, err := db.SchemaVersion(ctx)
 	if err != nil {
 		return err
 	}
@@ -173,7 +182,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	}
 	fmt.Fprintf(out, "device id:     %s\n", id.DeviceIDString())
 	fmt.Fprintf(out, "data dir:      %s\n", store.Dir())
-	fmt.Fprintf(out, "database:      %s (schema v%d)\n", db.Path(), version)
+	fmt.Fprintf(out, "database:      %s (schema v%d)\n", db.Path(), schemaVersion)
 	fmt.Fprintf(out, "projects:      %d\n", cat.Len())
 	fmt.Fprintf(out, "codex:         available=%v authenticated=%v", codexDiag.Available, codexDiag.Authenticated)
 	if codexDiag.Version != "" {
